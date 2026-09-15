@@ -349,7 +349,14 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 
         match = re.search(r"(\d+)\s*,\s*(\d+)", text)
         if match:
-            return int(match.group(1)), int(match.group(2))
+            # Patch: some Gemini models reply in 0-1000 normalized coordinates
+            # regardless of the stated screen size. A >1000 value with an
+            # endpoint over 1920 is the giveaway; scale it to real pixels.
+            x, y = int(match.group(1)), int(match.group(2))
+            if max(x, y) <= 1000 and max(w, h) > 1920:
+                x = round(x * w / 1000)
+                y = round(y * h / 1000)
+            return x, y
 
     except Exception as e:
         print(f"[ComputerControl] ⚠️ screen_find failed: {e}")

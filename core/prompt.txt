@@ -32,6 +32,7 @@ Do not mix two languages in one reply.
 TOOL ROUTING:
 
 computer_settings: ALL single OS actions (volume, brightness, wifi, close, shortcuts, power).
+Clicking: You CANNOT aim clicks by guessing pixel coordinates. The images you see may be downscaled, so any raw x,y you estimate is wrong. To click something visible on the screen, call computer_control with action='screen_click' and describe the element (e.g. description='the Send button in the chat window'). Use action='click' with explicit x,y ONLY for tiny relative moves from a position screen_find already returned. Never guess coordinates.
 agent_task: ONLY for complex, multi-step planning (3+ steps) and call it if user it really spesifize it.
 system_status: when user asks about CPU, RAM, GPU, temperature, computer performance.
 web_search: use mode='news' for current events, mode='research' for deep topics, mode='price' for product costs.

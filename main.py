@@ -104,6 +104,12 @@ CHUNK_SIZE          = 1024
 _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
 
+# Patch: voice barge-in thresholds. While JARVIS is speaking, the mic watches
+# for the USER's voice; speech louder than _BARGE_LEVEL sustained for
+# _BARGE_SUSTAIN_S interrupts him mid-sentence (same as pressing Esc).
+_BARGE_LEVEL     = 0.30
+_BARGE_SUSTAIN_S = 0.45
+
 
 def _pcm_level(samples) -> float:
     """Map a block of int16 PCM samples to a 0.0–1.0 loudness level for the HUD
@@ -366,6 +372,9 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        # Patch: voice barge-in — onset timestamp of sustained loud speech
+        # while JARVIS is talking (see _listen_audio / _BARGE_* constants).
+        self._barge_onset_t        = 0.0
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -397,7 +406,12 @@ class JarvisLive:
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
 
-        self._enhanced_live = True  # proactive audio; auto-disabled if the server rejects it
+        # Patch: proactive audio DISABLED. The model was over-filtering speech
+        # as "not addressed to JARVIS" — after finishing one command it went
+        # deaf until the user typed a message (its text resets the filter).
+        # Turning it off makes the mic stream unconditionally; JARVIS hears
+        # everything again, at the cost of possibly reacting to room chatter.
+        self._enhanced_live = False  # was True (proactive audio)
 
         _base_dir = Path(__file__).resolve().parent
         _inline_names = {t["name"] for t in TOOL_DECLARATIONS}
@@ -937,6 +951,21 @@ class JarvisLive:
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
+            # Patch: voice barge-in — while JARVIS is talking, keep watching the
+            # mic; sustained loud speech (the user talking over him) triggers the
+            # same interrupt() as the Esc key. Audio is still NOT streamed to
+            # Gemini while he speaks — only the local energy gate runs here.
+            if jarvis_speaking and not self.ui.muted and not self._phone_active:
+                if _pcm_level(indata) >= _BARGE_LEVEL:
+                    _now = time.monotonic()
+                    if self._barge_onset_t == 0.0:
+                        self._barge_onset_t = _now
+                    elif _now - self._barge_onset_t >= _BARGE_SUSTAIN_S:
+                        self._barge_onset_t = 0.0
+                        print("[JARVIS] ✋ Voice barge-in — user is talking over me")
+                        loop.call_soon_threadsafe(self.interrupt)
+                else:
+                    self._barge_onset_t = 0.0
             if not jarvis_speaking and not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(

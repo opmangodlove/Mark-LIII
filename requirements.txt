@@ -14,6 +14,8 @@ playwright
 pyautogui
 pyperclip
 pygetwindow
+plyer
+
 
 # ── Vision & media ────────────────────────────────────────────────────────────
 pillow

@@ -5,10 +5,11 @@
 # never be.
 
 # ── Secrets. Committing any of these publishes them. ──────────────────────────
-config/api_keys.json          # your Gemini API key, plus per-plugin credentials
-config/certs/                 # the dashboard's TLS private key and certificate
-config/whatsapp_web/          # a LINKED WhatsApp session — committing it hands
-                              # somebody your WhatsApp account, not just a key
+# NOTE: trailing "# comment" on a pattern line does NOT work in gitignore —
+# the pattern silently stops matching. Keep explanations on their own lines.
+config/api_keys.json
+config/certs/
+config/whatsapp_web/
 **/token*.json                # Google OAuth tokens (Gmail / Calendar plugins)
 **/client_secret*.json        # Google OAuth client secrets
 *credentials*.json
@@ -48,3 +49,8 @@ desktop.ini
 logs/
 downloads/
 screenshots/
+
+# ── Voice launcher: runtime state + the 68 MB local speech model ─────────────
+# (model is fetched on first run — see voice-launcher/voice_launch.py)
+voice-launcher/launcher_state.json
+voice-launcher/vosk-model-*/

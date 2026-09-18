@@ -54,3 +54,7 @@ screenshots/
 # (model is fetched on first run — see voice-launcher/voice_launch.py)
 voice-launcher/launcher_state.json
 voice-launcher/vosk-model-*/
+
+# runtime logs
+jlog-*.txt
+voice-launcher/launcher_log*.txt

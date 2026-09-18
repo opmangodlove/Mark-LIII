@@ -79,6 +79,7 @@ from core.action_loader        import discover_actions
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
+from core                      import tool_log
 
 # How long the assistant stays awake with no user speech before it auto-sleeps
 # again (wake-word mode only).
@@ -103,12 +104,6 @@ CHUNK_SIZE          = 1024
 # the bars still move for a quiet talker — language- and device-independent.
 _LEVEL_FLOOR = 60.0
 _LEVEL_FULL  = 2600.0
-
-# Patch: voice barge-in thresholds. While JARVIS is speaking, the mic watches
-# for the USER's voice; speech louder than _BARGE_LEVEL sustained for
-# _BARGE_SUSTAIN_S interrupts him mid-sentence (same as pressing Esc).
-_BARGE_LEVEL     = 0.30
-_BARGE_SUSTAIN_S = 0.45
 
 
 def _pcm_level(samples) -> float:
@@ -372,9 +367,7 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
-        # Patch: voice barge-in — onset timestamp of sustained loud speech
-        # while JARVIS is talking (see _listen_audio / _BARGE_* constants).
-        self._barge_onset_t        = 0.0
+        self._last_voice_at        = 0.0     # Patch: monotonic time of last played voice chunk (watchdogs)
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -502,6 +495,22 @@ class JarvisLive:
                 continue
             if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
                 self.sleep(reason="no speech for 2 minutes")
+
+    # Patch: latency watchdog — if Gemini stalls mid-turn (network hiccup) the
+    # HUD would sit in SPEAKING with no sound and the mic gated forever. After
+    # 20 s with zero audio, force the turn to end and reopen the mic.
+    async def _run_speech_watchdog(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            with self._speaking_lock:
+                speaking = self._is_speaking
+            if not speaking or not self._last_voice_at:
+                continue
+            idle = time.monotonic() - self._last_voice_at
+            if idle > 20.0:
+                print(f"[JARVIS] ⏱️ No audio for {idle:.0f}s mid-turn — forcing end of speech")
+                self.set_speaking(False, reason="latency watchdog")
+                self._last_voice_at = 0.0
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -639,13 +648,15 @@ class JarvisLive:
             self._loop
         )
 
-    def set_speaking(self, value: bool):
+    def set_speaking(self, value: bool, reason: str = ""):
         with self._speaking_lock:
             self._is_speaking = value
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
+        if reason:
+            print(f"[JARVIS] ⏱️ Speech ended ({reason}) — mic reopened")
 
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
@@ -770,6 +781,7 @@ class JarvisLive:
         name = fc.name
         args = dict(fc.args or {})
 
+        _t0 = time.monotonic()   # for the tool-log duration stamp
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
@@ -780,6 +792,14 @@ class JarvisLive:
             if key and value:
                 update_memory({category: {key: {"value": value}}})
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+            # Patch: recorded so save_memory shows up in the TOOL LOG too.
+            tool_log.record_tool_event(
+                name=name, args=args,
+                result=(f"saved memory: {category}/{key}" if key and value
+                        else "no key/value given"),
+                ok=bool(key and value),
+                duration_s=time.monotonic() - _t0,
+            )
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -908,6 +928,19 @@ class JarvisLive:
             traceback.print_exc()
             self.speak_error(name, e)
 
+        # Patch: every tool call is recorded for the UI's TOOL LOG viewer —
+        # name, exact arguments, result, outcome, and duration. Runs after the
+        # except block so failures are recorded too. Never raises.
+        tool_log.record_tool_event(
+            name=name,
+            args=args,
+            result=result,
+            ok=not str(result).lower().startswith((
+                "tool ", "unknown tool", "could not", "failed",
+            )),
+            duration_s=time.monotonic() - _t0,
+        )
+
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
@@ -951,22 +984,13 @@ class JarvisLive:
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
-            # Patch: voice barge-in — while JARVIS is talking, keep watching the
-            # mic; sustained loud speech (the user talking over him) triggers the
-            # same interrupt() as the Esc key. Audio is still NOT streamed to
-            # Gemini while he speaks — only the local energy gate runs here.
-            if jarvis_speaking and not self.ui.muted and not self._phone_active:
-                if _pcm_level(indata) >= _BARGE_LEVEL:
-                    _now = time.monotonic()
-                    if self._barge_onset_t == 0.0:
-                        self._barge_onset_t = _now
-                    elif _now - self._barge_onset_t >= _BARGE_SUSTAIN_S:
-                        self._barge_onset_t = 0.0
-                        print("[JARVIS] ✋ Voice barge-in — user is talking over me")
-                        loop.call_soon_threadsafe(self.interrupt)
-                else:
-                    self._barge_onset_t = 0.0
-            if not jarvis_speaking and not self.ui.muted and not self._phone_active:
+            # While JARVIS is speaking the mic does NOT stream and nothing
+            # interrupts him — he always finishes his sentence, then listens
+            # again. (Voice barge-in was removed: background noise kept
+            # cutting him off mid-sentence. Esc still interrupts manually.)
+            if jarvis_speaking:
+                return
+            if not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -977,6 +1001,9 @@ class JarvisLive:
                 # failure here must never disturb the mic.
                 try:
                     self.ui.set_audio_level(_pcm_level(indata))
+                    # HUD mic-health: raw int16 peak marks the indicator as
+                    # 'hearing' only when above digital-silence level.
+                    self.ui.set_mic_signal(int(np.abs(indata).max()))
                 except Exception:
                     pass
 
@@ -991,14 +1018,36 @@ class JarvisLive:
                     callback=callback,
                 )
 
-            # Which microphone. resolve() returns None for "system default" and
-            # for a saved device that is no longer present — so a headset
-            # unplugged since the last run falls back to the built-in mic
-            # instead of raising on startup and taking the session with it.
+            # Which microphone. Two failure modes are handled here:
+            #  1. The saved device cannot open at all — resolve() already
+            #     degrades to the system default instead of crashing.
+            #  2. The device OPENS but delivers digital zeros. Measured on
+            #     this machine: the built-in AMD mic array is the OS default
+            #     and is muted/dead at the driver level (pure zeros even
+            #     during a test beep), while the Bluetooth headset mic hears
+            #     perfectly. core/mic_health probes candidates for real
+            #     signal and returns one that provably carries audio.
             _mic_name = get_input_device()
             _mic_dev  = audio_devices.resolve(_mic_name, "input")
+            try:
+                from core import mic_health
+                _verified = mic_health.pick_input_device()
+                if _verified is not None:
+                    _mic_dev = _verified
+                    try:
+                        _vname = sd.query_devices()[_verified].get("name", "")
+                    except Exception:
+                        _vname = f"device #{_verified}"
+                    print(f"[JARVIS] 🎤 Input device (verified hearing): {_vname}")
+                    # Show the selected mic on the HUD (thread-safe setter).
+                    try:
+                        self.ui.set_mic_info(_vname)
+                    except Exception:
+                        pass
+            except Exception as _mh_e:
+                print(f"[JARVIS] ⚠️  mic_health unavailable ({_mh_e}) — using resolved device")
             if _mic_dev is not None:
-                print(f"[JARVIS] 🎤 Input device: {_mic_name}")
+                print(f"[JARVIS] 🎤 Input device: {_mic_dev}")
             try:
                 _mic_stream = _open_mic(_mic_dev)
             except Exception as _e:
@@ -1197,9 +1246,20 @@ class JarvisLive:
                     ):
                         self.set_speaking(False)
                         self._turn_done_event.clear()
+                    # Patch: stuck-mic watchdog — if Gemini's turn_complete was
+                    # lost (e.g. right after a tool call), _is_speaking stayed
+                    # True and the mic gate swallowed every spoken command until
+                    # a typed message reset things. 6 s of player-queue silence
+                    # with no audio means nothing more is coming: end the turn
+                    # locally and reopen the mic.
+                    elif self._last_voice_at and (
+                        time.monotonic() - self._last_voice_at > 6.0
+                    ):
+                        self.set_speaking(False, reason="stuck-mic watchdog")
                     continue
 
                 self.set_speaking(True)
+                self._last_voice_at = time.monotonic()
 
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
@@ -1648,6 +1708,7 @@ class JarvisLive:
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
+                    tg.create_task(self._run_speech_watchdog())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
@@ -1723,7 +1784,10 @@ class JarvisLive:
                     while not self.ui._win._ready:
                         await asyncio.sleep(1)
                     print("[JARVIS] New API key saved — reconnecting...")
-                    _conn_backoff = 3
+                    # Patch: was a bare local `_conn_backoff = 3` — a dead store
+                    # that never reached the reconnect delay below. The fixed
+                    # attribute keeps the fresh-key retry immediate.
+                    self._conn_backoff = 3
                     continue
 
                 # Network / timeout errors — log clearly and back off

@@ -17,6 +17,7 @@ Run:  pythonw voice_launch.py
 Stop:  tray-style — it has no UI; kill it from Task Manager (voice_launch.py)
 """
 
+import difflib
 import json
 import queue
 import subprocess
@@ -34,6 +35,7 @@ PYTHONW = APP_DIR / ".venv" / "Scripts" / "pythonw.exe"
 MAIN_PY = APP_DIR / "main.py"
 MODEL_DIR = BASE_DIR / "vosk-model-small-en-us-0.15"
 STATE_FILE = BASE_DIR / "launcher_state.json"
+LOG_FILE  = BASE_DIR / "launcher_log.txt"
 
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 0.1
@@ -67,6 +69,16 @@ QUIT_COOLDOWN_S = 10
 
 def log(msg: str) -> None:
     print(f"[voice-launch] {msg}", flush=True)
+    # Patch: pythonw discards stdout entirely, so the file is the only record
+    # of what the launcher heard and did. 1 MB cap keeps it a text file, not
+    # a disk filler; the previous run's copy survives as .old for post-mortems.
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 1_000_000:
+            LOG_FILE.replace(LOG_FILE.with_suffix(".old.txt"))
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+    except Exception:
+        pass
 
 
 # Patch: wmic was removed from modern Windows builds, so the old
@@ -93,6 +105,74 @@ def jarvis_pids() -> list[str]:
         log(f"process lookup failed: {e}")
         return []
     return [p for p in out.replace(",", " ").split() if p.strip()]
+
+
+def pick_input_device():
+    """Pick a microphone that actually hears sound.
+
+    Measured on this machine: the OS default (the built-in AMD mic array)
+    opens fine and delivers pure digital zeros — a perfectly healthy-looking
+    stream that is deaf. The launcher listened to that void for days, which
+    is why 'Jarvis good morning' never worked. core/mic_health probes each
+    candidate for real signal and returns one that provably carries audio,
+    preferring the device the JARVIS app itself uses (config)."""
+    try:
+        sys.path.insert(0, str(APP_DIR))
+        from core import mic_health
+        idx = mic_health.pick_input_device(logger=log)
+        if idx is not None:
+            return idx
+    except Exception as e:
+        log(f"mic_health failed ({e}) — falling back to app config")
+    # Fallback: whatever the JARVIS app resolves (system default if unset).
+    try:
+        from core import audio_devices
+        from memory.config_manager import get_input_device
+        name = get_input_device()
+        idx  = audio_devices.resolve(name, "input")
+        log(f"fallback device: {name!r} -> {idx if idx is not None else 'system default'}")
+        return idx
+    except Exception as e:
+        log(f"device pick failed ({e}) — using system default")
+        return None
+
+
+def _fuzzy_hit(tokens: list[str], phrase_tokens: list[str]) -> bool:
+    """Windowed token match that forgives one misheard word in three-plus.
+
+    Vosk's small offline model mishears through a Bluetooth headset
+    ('jervis goo morning'); a strict substring match then never fires and
+    nobody can tell why. A sliding window over the recognised words needs
+    ~all but one of the phrase's words to match approximately.
+
+    The phrase's FIRST word ('jarvis' / 'hey') must also match approximately
+    somewhere in the window — measured live: without an anchor, 'the order to
+    MAKE UP your a yeah' matched launch phrase 'jarvis WAKE UP' (make≈wake,
+    up=up) and spuriously triggered a launch."""
+    n = len(phrase_tokens)
+    if len(tokens) < n:
+        return False
+    needed = n if n <= 2 else n - 1
+    anchor = phrase_tokens[0]
+    for i in range(len(tokens) - n + 1):
+        window = tokens[i:i + n]
+        if not any(
+            a == anchor or difflib.SequenceMatcher(None, a, anchor).ratio() >= 0.6
+            for a in window
+        ):
+            continue
+        hits = sum(
+            1 for a, b in zip(window, phrase_tokens)
+            if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
+        )
+        if hits >= needed:
+            return True
+    return False
+
+
+def match_any(text: str, phrases: list[str]) -> bool:
+    toks = text.lower().split()
+    return any(_fuzzy_hit(toks, p.lower().split()) for p in phrases)
 
 
 def launch_jarvis() -> None:
@@ -148,8 +228,6 @@ def listen() -> None:
     rec.SetWords(False)
 
     frames_per_chunk = int(SAMPLE_RATE * CHUNK_SECONDS)
-    last_launch = 0.0
-    last_quit = 0.0
 
     # Patch: phrase handling moved OUT of the audio callback. The process
     # lookup can take a second or two (PowerShell spin-up); doing that inside
@@ -157,30 +235,60 @@ def listen() -> None:
     # The callback now only recognises and enqueues; the main loop acts.
     actions_q: queue.Queue = queue.Queue()
 
+    mic_state = {"last_data": time.time(), "max_level": 0}
+
     def on_audio(indata, frames, time_info, status):
-        if rec.AcceptWaveform(indata.tobytes()):
-            text = json.loads(rec.Result()).get("text", "")
-            if not text:
-                return
-            if any(p in text for p in QUIT_PHRASES):
-                actions_q.put(("quit", text))
-                rec.Reset()
-                return
-            if any(p in text for p in LAUNCH_PHRASES):
-                actions_q.put(("launch", text))
-                rec.Reset()
+        # Patch: any exception inside a PortAudio callback silently kills the
+        # stream — the process keeps 'running' but delivers no audio ever
+        # again. That is exactly how this launcher went deaf for days. Nothing
+        # in here is allowed to raise.
+        try:
+            mic_state["last_data"] = time.time()
+            lvl = int(abs(indata).max()) if len(indata) else 0
+            if lvl > mic_state["max_level"]:
+                mic_state["max_level"] = lvl
+            if rec.AcceptWaveform(indata.tobytes()):
+                text = json.loads(rec.Result()).get("text", "")
+                if not text:
+                    return
+                log(f"heard: {text!r}")
+                if match_any(text, QUIT_PHRASES):
+                    actions_q.put(("quit", text))
+                    rec.Reset()
+                    return
+                if match_any(text, LAUNCH_PHRASES):
+                    actions_q.put(("launch", text))
+                    rec.Reset()
+        except Exception as e:
+            log(f"audio callback error: {e}")
 
     log("listening — say 'Jarvis good morning' to launch JARVIS")
     last_launch = 0.0
     last_quit = 0.0
+    dev = pick_input_device()
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype="int16",
         blocksize=frames_per_chunk,
+        device=dev,
         callback=on_audio,
     ):
+        last_beat = time.time()
         while True:
+            # Patch: mic watchdog — if PortAudio stops delivering frames
+            # (driver hiccup, unplugged device, dead callback), restarting
+            # the stream is the only cure, and without this nobody would
+            # ever know. Raising reuses the service-style restart loop below.
+            silent_for = time.time() - mic_state["last_data"]
+            if silent_for > 30:
+                log(f"mic silent {silent_for:.0f}s (max level seen: "
+                    f"{mic_state['max_level']}) — restarting audio stream")
+                raise RuntimeError("mic watchdog: no audio for 30s")
+            if time.time() - last_beat > 60:
+                last_beat = time.time()
+                log(f"alive; mic max level last minute: {mic_state['max_level']}")
+                mic_state["max_level"] = 0
             try:
                 kind, text = actions_q.get(timeout=1.0)
             except queue.Empty:

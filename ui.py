@@ -33,6 +33,14 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 
+# Patch: optional global-hotkey support so F4 (mute) works even when this
+# window is NOT focused. If the module is missing, F4 falls back to the
+# in-window Qt shortcut and everything still works.
+try:
+    import keyboard as _kb
+except Exception:
+    _kb = None
+
 # ── Which Mark this is ───────────────────────────────────────────────────────
 # One constant, read by the window title, the header badge and the PROTOCOL
 # panel. It used to be typed separately in each of those places, and they drifted:
@@ -389,6 +397,16 @@ class HudCanvas(QWidget):
         self.state    = "INITIALISING"
         self._assistant_name = assistant_name
 
+        # ── Microphone health indicator ─────────────────────────────────────
+        # Patch: the launcher once listened to a mic that opened successfully
+        # but delivered pure digital zeros (the built-in array was dead at the
+        # driver level). The HUD now shows WHICH mic was selected and whether
+        # it actually hears anything, so a dead mic can never hide again.
+        self.mic_name       = ""       # short name shown on the HUD
+        self.mic_hearing    = False    # real signal observed recently?
+        self._mic_last_rx   = 0.0      # monotonic time of last real signal
+        self._mic_seal_t    = 0.0      # last time the SEAL/waveform was checked
+
         self._tick       = 0
         self._scale      = 1.0
         self._tgt_scale  = 1.0
@@ -441,6 +459,22 @@ class HudCanvas(QWidget):
         if lv > self._live_amp:
             self._live_amp = lv
 
+    def set_mic_info(self, name: str) -> None:
+        """Thread-safe: tell the HUD which microphone was selected."""
+        self.mic_name = str(name or "")[:40]
+
+    def set_mic_signal(self, peak: int) -> None:
+        """Thread-safe: called from the mic callback with the raw int16 peak
+        of each chunk. Peaks above the digital-silence threshold (measured:
+        a dead driver emits ±1-2 LSB even while 'open') mark the mic as
+        actually hearing audio."""
+        try:
+            if int(peak) > 6:
+                self._mic_last_rx = time.time()
+                self.mic_hearing = True
+        except (TypeError, ValueError):
+            pass
+
     def _load_face(self, path: str):
         try:
             from PIL import Image, ImageDraw
@@ -485,6 +519,12 @@ class HudCanvas(QWidget):
         self._live_amp *= 0.86
         self._amp_disp += (self._live_amp - self._amp_disp) * 0.45
         amp = self._amp_disp
+
+        # Mic-health: 'hearing' expires a few seconds after the last real
+        # signal, so a mic that stops delivering audio flips the indicator
+        # to NOT HEARING instead of sitting green forever.
+        if self.mic_hearing and (time.time() - self._mic_last_rx) > 4.0:
+            self.mic_hearing = False
 
         # Slow "breathing" base target (random shimmer), refreshed on a timer.
         if now - self._last_t > (0.12 if self.speaking else 0.5):
@@ -715,6 +755,24 @@ class HudCanvas(QWidget):
         p.setPen(QPen(col, 1))
         p.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
         p.drawText(QRectF(0, sy, W, 26), Qt.AlignmentFlag.AlignCenter, txt)
+
+        # Microphone health line — which mic was selected and whether it
+        # actually hears audio right now.
+        p.setFont(QFont("Courier New", 7))
+        if self.muted:
+            m_txt, m_col = "🔇 mic muted (F4)", qcol(C.MUTED_C)
+        elif not self.mic_name:
+            m_txt, m_col = "🎙 mic: detecting…", qcol(C.BORDER_B)
+        elif self.mic_hearing:
+            short = self.mic_name if len(self.mic_name) <= 28 else self.mic_name[:27] + "…"
+            m_txt, m_col = f"🎙 {short}  ● hearing", qcol(C.GREEN)
+        else:
+            short = self.mic_name if len(self.mic_name) <= 24 else self.mic_name[:23] + "…"
+            m_txt, m_col = f"🎙 {short}  ⚠ NOT HEARING", qcol("#ffaa00")
+        # (waveform baseline sits at sy+30 with bars rising ~24px above it;
+        # this line goes just below that baseline)
+        p.setPen(QPen(m_col, 1))
+        p.drawText(QRectF(0, sy + 54, W, 16), Qt.AlignmentFlag.AlignCenter, m_txt)
 
         # waveform — reacts to the real audio level (mic while listening,
         # JARVIS's own voice while speaking). Falls back to a gentle idle
@@ -2506,6 +2564,89 @@ class PluginSettingsOverlay(QWidget):
         lbl.setStyleSheet(f"color: {color}; background: transparent;")
 
 
+class SessionLogOverlay(_HudOverlay):
+    """TOOL LOG — exactly which tool JARVIS called last, with arguments,
+    result, and timing for each call.
+
+    The chat log shows the conversation; this shows the machinery underneath
+    it. Data comes from core.tool_log's ring buffer, filled by the tool
+    dispatcher itself — so it is what actually happened, not what the model
+    said it did. Refreshes on a timer while open."""
+
+    _OW, _OH = 620, 520
+    _SHOW = 40          # how many recent calls to render
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            SessionLogOverlay {{
+                background: rgba(0, 6, 10, 246);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(8)
+
+        hdr = QHBoxLayout()
+        title = QLabel("◈  TOOL LOG")
+        title.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(title)
+        hdr.addStretch(1)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; font-weight: bold; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        close_btn.clicked.connect(self.hide)
+        hdr.addWidget(close_btn)
+        root.addLayout(hdr)
+
+        self._view = QTextEdit()
+        self._view.setReadOnly(True)
+        self._view.setFont(QFont("Courier New", 9))
+        self._view.setStyleSheet(f"""
+            QTextEdit {{
+                background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 4px; padding: 8px;
+            }}
+            QScrollBar:vertical {{ background: {C.BG}; width: 8px; border: none; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 4px; min-height: 20px; }}
+        """)
+        root.addWidget(self._view, 1)
+
+        foot = QLabel("Calls with ✘ failed. The newest call is at the bottom.")
+        foot.setFont(QFont("Courier New", 7))
+        foot.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        root.addWidget(foot)
+
+        self._refresh()
+        self._tmr = QTimer(self)
+        self._tmr.timeout.connect(self._refresh)
+        self._tmr.start(2000)
+
+    def _refresh(self):
+        try:
+            from core.tool_log import format_events_for_ui
+            text = format_events_for_ui(self._SHOW)
+        except Exception as e:
+            text = f"Tool log unavailable: {e}"
+        if self._view.toPlainText() != text:
+            scroll = self._view.verticalScrollBar()
+            stick = scroll.value() >= scroll.maximum() - 4   # follow unless reading up
+            self._view.setPlainText(text)
+            if stick:
+                scroll.setValue(scroll.maximum())
+
+
 class RemoteKeyOverlay(QWidget):
     """Floating overlay — QR code for instant phone pairing + manual key fallback."""
 
@@ -2746,6 +2887,7 @@ class MainWindow(QMainWindow):
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
+    _mute_sig       = pyqtSignal()           # global F4 hotkey → Qt main thread
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2919,6 +3061,21 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+        # Patch: F4 (mute) now works GLOBALLY — previously it only fired when
+        # the HUD window had focus, so pressing it inside another app did
+        # nothing. The global hook emits a signal that hops to the Qt main
+        # thread; the in-window shortcut is disabled while the hook is live
+        # so a single press can never toggle mute twice. suppress=False keeps
+        # F4 working normally inside other apps.
+        if _kb is not None:
+            try:
+                self._mute_sig.connect(self._toggle_mute)
+                _kb.add_hotkey("f4", self._mute_sig.emit, suppress=False)
+                sc_mute.setEnabled(False)
+                print("[UI] Global F4 mute active — works from any app")
+            except Exception as e:
+                print(f"[UI] Global F4 unavailable ({e}); F4 mute only when window focused")
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -3694,6 +3851,16 @@ class MainWindow(QMainWindow):
         remote_btn.clicked.connect(self._open_remote)
         lay.addWidget(remote_btn)
 
+        # Patch: TOOL LOG viewer — a conversation log shows what JARVIS said;
+        # this shows what it DID. Every tool call lands here.
+        tl_btn = QPushButton("▤  TOOL LOG")
+        tl_btn.setFixedHeight(26)
+        tl_btn.setFont(QFont("Courier New", 7))
+        tl_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        tl_btn.setStyleSheet(_BTN_STYLE_DIM)
+        tl_btn.clicked.connect(self._open_tool_log)
+        lay.addWidget(tl_btn)
+
         fs_btn = QPushButton("⛶  FULLSCREEN  [F11]")
         fs_btn.setFixedHeight(26)
         fs_btn.setFont(QFont("Courier New", 7))
@@ -4347,6 +4514,15 @@ class MainWindow(QMainWindow):
         self._centre_overlay(ov)
         self._memory_overlay = ov
 
+    # ── Tool log panel ───────────────────────────────────────────────────────
+
+    def _open_tool_log(self):
+        """TOOL LOG — which tool ran last, with args/results. Position mirrors
+        the memory panel: hand-placed overlay, reference kept so it isn't GC'd."""
+        ov = SessionLogOverlay(parent=self.centralWidget())
+        self._centre_overlay(ov)
+        self._tool_log_overlay = ov
+
     # ── Irreversible-action confirmation ─────────────────────────────────────
 
     def _show_confirm_banner(self, title: str, detail: str):
@@ -4639,6 +4815,20 @@ class JarvisUI:
         GIL, so no signal/lock is needed for this cosmetic value."""
         try:
             self._win.hud.set_audio_level(level)
+        except Exception:
+            pass
+
+    def set_mic_info(self, name: str) -> None:
+        """Thread-safe: show which microphone JARVIS selected on the HUD."""
+        try:
+            self._win.hud.set_mic_info(name)
+        except Exception:
+            pass
+
+    def set_mic_signal(self, peak: int) -> None:
+        """Thread-safe: feed the raw mic peak so the HUD can show 'hearing'"""
+        try:
+            self._win.hud.set_mic_signal(peak)
         except Exception:
             pass
 

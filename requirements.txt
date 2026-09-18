@@ -15,6 +15,7 @@ pyautogui
 pyperclip
 pygetwindow
 plyer
+keyboard
 
 
 # ── Vision & media ────────────────────────────────────────────────────────────

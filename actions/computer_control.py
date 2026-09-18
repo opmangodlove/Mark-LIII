@@ -39,6 +39,56 @@ _BASE         = _base_dir()
 _CONFIG_PATH  = _BASE / "config" / "api_keys.json"
 _MEMORY_PATH  = _BASE / "memory" / "long_term.json"
 
+# Patch: the vision loop sees the screen as a downscaled image (max 1280x720,
+# see screen_processor._IMG_MAX_W/_H). When the model answers 'click x=300
+# y=200' it means 'the pixel at 300,200 in the image I was shown' — executing
+# those numbers as real screen coordinates lands the click ~1.67x off on a
+# 1920-wide display, which is exactly the 'it presses somewhere else' bug. Any
+# raw coordinate pair at or below the viewport bounds is therefore treated as
+# viewport pixels and scaled up to the real screen before touching the mouse.
+# Real-pixel callers (screen_find scaling, drag endpoints from screen_find)
+# are unaffected: they exceed the 720p viewport on any full-HD-or-larger
+# display. An actual 720p screen would rescale by 1.0 and change nothing.
+# Coordinates that exactly match the most recent screen_find result are also
+# passed through untouched — those are known-real pixels being replayed.
+_LAST_FIND: tuple[int, int] | None = None
+try:
+    from actions import screen_processor as _sp
+    _VIEW_MAX_W = int(getattr(_sp, "_IMG_MAX_W", 1280))
+    _VIEW_MAX_H = int(getattr(_sp, "_IMG_MAX_H", 720))
+except Exception:                                    # pragma: no cover
+    _VIEW_MAX_W, _VIEW_MAX_H = 1280, 720
+
+
+def _screen_size() -> tuple[int, int]:
+    """Physical screen size, used to scale viewport coordinates up."""
+    try:
+        _require_pyautogui()
+        w, h = pyautogui.size()
+        return int(w), int(h)
+    except Exception:
+        return 0, 0
+
+
+def _rescale_xy(x, y) -> tuple[int, int]:
+    """Map a coordinate pair from the vision viewport (max 1280x720) onto the
+    real screen. Pairs larger than the viewport are left alone — they are
+    already real pixels (e.g. handed back by screen_find) — and so are pairs
+    exactly matching the latest screen_find result."""
+    try:
+        xi, yi = int(x), int(y)
+    except (TypeError, ValueError):
+        return 0, 0
+    if _LAST_FIND is not None and (xi, yi) == _LAST_FIND:
+        return xi, yi
+    sw, sh = _screen_size()
+    if sw <= 0 or sh <= 0:
+        return xi, yi
+    if xi <= _VIEW_MAX_W and yi <= _VIEW_MAX_H:
+        return min(max(round(xi * sw / _VIEW_MAX_W), 0), sw - 1), \
+               min(max(round(yi * sh / _VIEW_MAX_H), 0), sh - 1)
+    return xi, yi
+
 def _load_config() -> dict:
     try:
         return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -181,8 +231,9 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
 def _click(x=None, y=None, button: str = "left", clicks: int = 1) -> str:
     _require_pyautogui()
     if x is not None and y is not None:
-        pyautogui.click(x, y, button=button, clicks=clicks)
-        return f"{'Double-c' if clicks == 2 else 'C'}licked ({x}, {y}) [{button}]"
+        rx, ry = _rescale_xy(x, y)
+        pyautogui.click(rx, ry, button=button, clicks=clicks)
+        return f"{'Double-c' if clicks == 2 else 'C'}licked ({rx}, {ry}) [{button}]"
     pyautogui.click(button=button, clicks=clicks)
     return f"Clicked at current position [{button}]"
 
@@ -209,15 +260,18 @@ def _scroll(direction: str = "down", amount: int = 3) -> str:
 
 def _move(x: int, y: int, duration: float = 0.3) -> str:
     _require_pyautogui()
-    pyautogui.moveTo(x, y, duration=duration)
-    return f"Mouse → ({x}, {y})"
+    rx, ry = _rescale_xy(x, y)
+    pyautogui.moveTo(rx, ry, duration=duration)
+    return f"Mouse → ({rx}, {ry})"
 
 
 def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.5) -> str:
     _require_pyautogui()
-    pyautogui.moveTo(x1, y1, duration=0.2)
-    pyautogui.dragTo(x2, y2, duration=duration, button="left")
-    return f"Dragged ({x1},{y1}) → ({x2},{y2})"
+    rx1, ry1 = _rescale_xy(x1, y1)
+    rx2, ry2 = _rescale_xy(x2, y2)
+    pyautogui.moveTo(rx1, ry1, duration=0.2)
+    pyautogui.dragTo(rx2, ry2, duration=duration, button="left")
+    return f"Dragged ({rx1},{ry1}) → ({rx2},{ry2})"
 
 
 def _clipboard_get() -> str:
@@ -328,11 +382,18 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         image_bytes = buf.getvalue()
 
         client = genai.Client(api_key=api_key)
+        # Patch: ask for NORMALIZED 0-1000 coordinates explicitly, then scale
+        # deterministically. Previously the model chose its own units — some
+        # replies were raw pixels, some 0-1000 normalized — and the ambiguity
+        # made clicks land ~200px off on 1920-wide screens (the >1920 heuristic
+        # never fired there). A fixed output unit removes the guesswork.
         prompt = (
-            f"This is a screenshot of a {w}×{h} pixel screen. "
-            f"Locate the UI element described as: '{description}'. "
-            f"Reply with ONLY the center coordinates as: x,y "
-            f"If the element is not visible, reply: NOT_FOUND"
+            "Locate the UI element described as: '" + description + "'. "
+            "Reply with ONLY the center coordinates of the element as: x,y "
+            "where x and y are integers between 0 and 1000, normalized to the "
+            "image size (top-left corner is 0,0, the bottom-right is 1000,1000; "
+            "the exact center of the image is 500,500). "
+            "If the element is not visible, reply: NOT_FOUND"
         )
 
         response = client.models.generate_content(
@@ -349,14 +410,20 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 
         match = re.search(r"(\d+)\s*,\s*(\d+)", text)
         if match:
-            # Patch: some Gemini models reply in 0-1000 normalized coordinates
-            # regardless of the stated screen size. A >1000 value with an
-            # endpoint over 1920 is the giveaway; scale it to real pixels.
+            # The prompt demands 0-1000 normalized coordinates; scale them to
+            # real pixels. Values >1000 (model ignored the format) are clamped
+            # so a wild reply can never click off-screen.
             x, y = int(match.group(1)), int(match.group(2))
-            if max(x, y) <= 1000 and max(w, h) > 1920:
-                x = round(x * w / 1000)
-                y = round(y * h / 1000)
-            return x, y
+            if x > 1000 or y > 1000:
+                print(f"[ComputerControl] screen_find ignored out-of-range reply: {text[:40]!r}")
+                return None
+            px = min(max(round(x * w / 1000), 0), w - 1)
+            py = min(max(round(y * h / 1000), 0), h - 1)
+            # Remember the real-pixel result so a raw click replaying these
+            # exact numbers is never misread as viewport pixels.
+            global _LAST_FIND
+            _LAST_FIND = (px, py)
+            return px, py
 
     except Exception as e:
         print(f"[ComputerControl] ⚠️ screen_find failed: {e}")
@@ -476,14 +543,19 @@ def computer_control(
 
         if action == "screen_find":
             coords = _screen_find(params.get("description", ""))
-            return f"{coords[0]},{coords[1]}" if coords else "NOT_FOUND"
+            # Phrase it as real pixels so the model treats the numbers as
+            # screen coordinates, not viewport coordinates.
+            return (f"{coords[0]},{coords[1]} (real screen pixels — pass these "
+                    f"exact numbers to click)") if coords else "NOT_FOUND"
 
         if action == "screen_click":
             desc   = params.get("description", "")
             coords = _screen_find(desc)
             if coords:
                 time.sleep(0.2)
-                _click(x=coords[0], y=coords[1])
+                # Real pixels straight from screen_find — skip viewport
+                # rescaling by clicking through pyautogui directly.
+                pyautogui.click(coords[0], coords[1])
                 return f"Clicked '{desc}' at {coords}"
             return f"Element not found on screen: '{desc}'"
 

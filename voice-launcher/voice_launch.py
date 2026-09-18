@@ -22,6 +22,7 @@ import json
 import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -37,12 +38,20 @@ MODEL_DIR = BASE_DIR / "vosk-model-small-en-us-0.15"
 STATE_FILE = BASE_DIR / "launcher_state.json"
 LOG_FILE  = BASE_DIR / "launcher_log.txt"
 
+# Patch: crash auto-revival. A clean exit ("Jarvis goodnight", window closed,
+# shutdown tool) leaves this flag behind; a crash leaves nothing. When the
+# monitor finds JARVIS gone WITHOUT the flag, he died unexpectedly — relaunch.
+CLEAN_EXIT_FLAG = APP_DIR / "clean_exit.flag"
+
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 0.1
 # How long after a launch before this listener may launch again. JARVIS needs
 # a few seconds to boot; without this, one long "jarvis good morninggg" could
 # fire twice and open two copies.
 LAUNCH_COOLDOWN_S = 30
+
+# Crash auto-revival: started once per process (listen() can re-enter).
+_monitor_started = False
 
 # Phrases that launch JARVIS. Matched as substrings of the recognised text,
 # lowercased, so "jarvis good morning to you too" still fires.
@@ -180,6 +189,9 @@ def launch_jarvis() -> None:
     if not PYTHONW.exists():
         log(f"ERROR: python not found at {PYTHONW}")
         return
+    # Any older flag is now meaningless — the coming run's exit is the one
+    # that counts.
+    _clear_clean_exit()
     subprocess.Popen(
         [str(PYTHONW), str(MAIN_PY)],
         cwd=str(APP_DIR),
@@ -190,6 +202,10 @@ def launch_jarvis() -> None:
 # Patch: the old quit killed EVERY pythonw.exe — including this launcher,
 # which is also a pythonw process. Kill only JARVIS's own PIDs.
 def quit_jarvis(pids: list[str]) -> None:
+    # The launcher is doing the killing, so JARVIS cannot mark his own exit —
+    # the flag must be written here or the monitor would read this deliberate
+    # quit as a crash and revive him mid-goodnight.
+    _mark_clean_exit()
     log(f"quit phrase heard — closing JARVIS (pids: {', '.join(pids)})")
     for pid in pids:
         subprocess.run(
@@ -210,10 +226,109 @@ def write_state(trigger: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Crash auto-revival
+# ---------------------------------------------------------------------------
+
+def _mark_clean_exit() -> None:
+    try:
+        CLEAN_EXIT_FLAG.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _clear_clean_exit() -> None:
+    try:
+        CLEAN_EXIT_FLAG.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _has_clean_exit() -> bool:
+    try:
+        return CLEAN_EXIT_FLAG.exists()
+    except Exception:
+        return False
+
+
+def _announce(text: str) -> None:
+    """Speak one line via Windows' built-in SAPI voice. Best-effort: the
+    launcher must work even if speech fails; the log is the real record."""
+    log(f"saying: {text!r}")
+    try:
+        import win32com.client as _w
+        _w.Dispatch("SAPI.SpVoice").Speak(text)
+        return
+    except Exception:
+        pass
+    try:
+        ps = ("$v = New-Object -ComObject SAPI.SpVoice; "
+              f"$v.Speak('{text}')")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=20,
+        )
+    except Exception:
+        pass
+
+
+# Only announce a crash for a JARVIS that was actually seen running — the
+# monitor must stay silent before the first launch (he simply isn't up yet).
+# Two-tick hysteresis (10 s each): a running JARVIS only clears the flag
+# after being seen twice in a row, and a disappearance only counts after two
+# empty polls. This closes both races: a process-kill's dying gap cannot
+# erase the quit flag, and a one-poll process hiccup cannot fake a crash.
+_revival_seen_running = False
+_revival_run_ticks = 0
+_revival_gone_ticks = 0
+
+
+def _revival_monitor() -> None:
+    global _revival_seen_running, _revival_run_ticks, _revival_gone_ticks
+    while True:
+        time.sleep(10)
+        try:
+            pids = jarvis_pids()
+        except Exception:
+            continue
+        if pids:
+            _revival_gone_ticks = 0
+            _revival_run_ticks += 1
+            if _revival_run_ticks >= 2:
+                # Stably running: any flag left over is stale — the next
+                # death of THIS run is the one that counts.
+                _revival_seen_running = True
+                _clear_clean_exit()
+            continue
+        _revival_run_ticks = 0
+        _revival_gone_ticks += 1
+        if _revival_gone_ticks < 2 or not _revival_seen_running:
+            continue
+        _revival_seen_running = False
+        _revival_gone_ticks = 0
+        if _has_clean_exit():
+            # Deliberate exit — stay quiet until the next launch.
+            continue
+        log("JARVIS vanished without a clean-exit flag — treating as a crash")
+        _clear_clean_exit()
+        _announce("Pardon the interruption, sir. JARVIS restarted after a fault.")
+        launch_jarvis()
+
+
+# ---------------------------------------------------------------------------
 # Audio + recognition
 # ---------------------------------------------------------------------------
 
 def listen() -> None:
+    # Patch: crash auto-revival monitor — one per launcher process, not one
+    # per listen() restart (the mic watchdog re-enters this function).
+    global _monitor_started
+    if not _monitor_started:
+        _monitor_started = True
+        threading.Thread(target=_revival_monitor, daemon=True,
+                         name="jarvis-revival").start()
+
     from vosk import Model, KaldiRecognizer
     import sounddevice as sd
     import numpy as np   # noqa: F401  (sounddevice imports it anyway)
@@ -317,6 +432,9 @@ def listen() -> None:
 
 
 if __name__ == "__main__":
+    # A flag surviving from a previous launcher run says nothing about the
+    # JARVIS run that follows — crashes since then must be revivable.
+    _clear_clean_exit()
     while True:
         try:
             listen()

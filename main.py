@@ -35,6 +35,7 @@ for _stream in (_sys.stdout, _sys.stderr):
         pass
 
 import asyncio
+import os
 import re
 import threading
 import time
@@ -892,8 +893,8 @@ class JarvisLive:
                         except Exception:
                             pass
                     await asyncio.sleep(1.5)
-                    import os as _os
-                    _os._exit(0)
+                    _mark_clean_exit()
+                    os._exit(0)
                 asyncio.create_task(_do_shutdown())
 
             elif self._action_registry.has(name):
@@ -1823,6 +1824,18 @@ class JarvisLive:
 def main():
     ui = JarvisUI("face.png")
 
+    # Boot self-test: prove mic, Gemini API and screen capture BEFORE the
+    # live session starts, and speak only the failures. A healthy boot is
+    # silent. Runs in the background so the window appears instantly.
+    try:
+        from core import boot_check
+        threading.Thread(
+            target=boot_check.run, kwargs={"ui": ui},
+            daemon=True, name="boot-check",
+        ).start()
+    except Exception as _bc_e:
+        print(f"[JARVIS] boot self-test unavailable: {_bc_e}")
+
     def runner():
         ui.wait_for_api_key()
         jarvis = JarvisLive(ui)
@@ -1832,7 +1845,18 @@ def main():
             print("\n🔴 Shutting down...")
 
     threading.Thread(target=runner, daemon=True).start()
+    ui.on_app_close(_mark_clean_exit)
     ui.root.mainloop()
+
+
+def _mark_clean_exit(*_a) -> None:
+    """Leave a flag saying 'I meant to exit' so the voice launcher's crash
+    monitor does not revive JARVIS after a deliberate shutdown."""
+    try:
+        (Path(__file__).resolve().parent / "clean_exit.flag").write_text(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()

@@ -2888,6 +2888,17 @@ class MainWindow(QMainWindow):
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
     _mute_sig       = pyqtSignal()           # global F4 hotkey → Qt main thread
+    _app_close_sig  = pyqtSignal()           # user closed the window (crash-revival knows)
+
+    def closeEvent(self, e):
+        # Patch: the user closed the window — a deliberate exit. main.py hooks
+        # this signal to mark a clean exit so the voice launcher's crash
+        # monitor does not "revive" a wanted shutdown.
+        try:
+            self._app_close_sig.emit()
+        except Exception:
+            pass
+        super().closeEvent(e)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -4844,6 +4855,13 @@ class JarvisUI:
     def wait_for_api_key(self):
         while not self._win._ready:
             time.sleep(0.1)
+
+    def on_app_close(self, cb) -> None:
+        """Callback fired when the user closes the window (crash-revival knows)."""
+        try:
+            self._win._app_close_sig.connect(cb)
+        except Exception:
+            pass
 
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""

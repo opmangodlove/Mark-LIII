@@ -12,13 +12,44 @@ import webbrowser
 from pathlib import Path
 from typing import Optional
 
-from playwright.async_api import (
-    async_playwright,
-    BrowserContext,
-    Page,
-    Playwright,
-    TimeoutError as PlaywrightTimeout,
-)
+# Patch: playwright used to be imported at module top-level. Every JARVIS
+# boot loaded the whole Playwright driver (hundreds of modules) through the
+# action loader even when no browser tool was ever called — seconds of pure
+# startup tax. It is now imported on first use instead (see
+# _ensure_playwright_loaded below).
+_pw_names: set[str] = set()   # playwright names successfully loaded so far
+
+
+def _ensure_playwright_loaded() -> None:
+    """Import playwright's async API on first need (idempotent, thread-safe
+    enough: worst case two threads import the same module, which Python
+    serialises internally)."""
+    if "async_playwright" in _pw_names:
+        return
+    try:
+        from playwright.async_api import (
+            async_playwright,
+            BrowserContext,
+            Page,
+            Playwright,
+            TimeoutError as PlaywrightTimeout,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "playwright is not available. Install with: pip install playwright "
+            "&& python -m playwright install chromium"
+        ) from e
+    globals().update({
+        "async_playwright": async_playwright,
+        "BrowserContext": BrowserContext,
+        "Page": Page,
+        "Playwright": Playwright,
+        "PlaywrightTimeout": PlaywrightTimeout,
+    })
+    _pw_names.update({
+        "async_playwright", "BrowserContext", "Page", "Playwright",
+        "PlaywrightTimeout",
+    })
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -455,9 +486,9 @@ class _BrowserSession:
         self._thread:  threading.Thread | None          = None
         self._ready    = threading.Event()
 
-        self._pw:      Playwright     | None = None
-        self._context: BrowserContext | None = None
-        self._page:    Page           | None = None
+        self._pw      = _ensure_playwright_loaded() or None
+        self._context = _ensure_playwright_loaded() or None
+        self._page    = None
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -478,6 +509,11 @@ class _BrowserSession:
         self._loop.run_forever()
 
     async def _async_init(self):
+        await self._lazy_load()
+
+    async def _lazy_load(self):
+        """Import playwright on first browser use, not at app boot."""
+        _ensure_playwright_loaded()
         self._pw = await async_playwright().start()
 
     def run(self, coro, timeout: int = 60) -> str:
@@ -633,12 +669,13 @@ class _BrowserSession:
         return self._page
 
     async def go_to(self, url: str) -> str:
+        _ensure_playwright_loaded()   # no-op after the first browser call
 
         url      = _normalize_url(url)
         page     = await self._get_page()
         prev_url = page.url
 
-        async def _do_goto(p: Page) -> str:
+        async def _do_goto(p) -> str:   # Page (annotated lazily)
             """Attempt navigation and return the resulting URL (may still be blank)."""
             try:
                 await p.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -665,10 +702,12 @@ class _BrowserSession:
         return f"Could not open: {url}"
 
     async def search(self, query: str, engine: str = "google") -> str:
+        _ensure_playwright_loaded()
         base = _SEARCH_ENGINES.get(engine.lower(), _SEARCH_ENGINES["google"])
         return await self.go_to(base + query.replace(" ", "+"))
 
     async def click(self, selector: str = None, text: str = None) -> str:
+        _ensure_playwright_loaded()
         page = await self._get_page()
         try:
             if text:

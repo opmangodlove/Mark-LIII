@@ -40,6 +40,13 @@ _SILENCE_PEAK = 6
 # startup; measured headsets idle well above this, dead drivers sit at 0-2).
 _STRONG_SIGNAL = 1000
 
+# Very short cache: the boot self-test and main.py's own mic selection run
+# seconds apart — probing every endpoint twice delays startup for nothing.
+# Deliberately NOT a long cache: a headset can power off within a minute and
+# change which device is the right one.
+_cache: tuple[float, int | None] | None = None
+_CACHE_TTL = 5.0
+
 
 def _peak_level(dev_idx: int, sr: int, seconds: float) -> int | None:
     """Max int16 amplitude seen on this device, or None if it cannot open."""
@@ -86,6 +93,11 @@ def pick_input_device(logger=None) -> int | None:
     Order: saved config choice → OS default → every other input endpoint.
     The result of the *best* candidate wins; ties go to the earlier candidate.
     """
+    global _cache
+    _now = time.monotonic()
+    if _cache is not None and (_now - _cache[0]) < _CACHE_TTL:
+        return _cache[1]
+
     def _log(msg: str) -> None:
         print(f"[MicHealth] {msg}")
         if logger is not None:
@@ -163,7 +175,9 @@ def pick_input_device(logger=None) -> int | None:
     if best_idx is not None and best_peak > _SILENCE_PEAK:
         _log(f"selected input #{best_idx} "
              f"'{(devices[best_idx].get('name') or '')[:44]}' (peak {best_peak})")
+        _cache = (time.monotonic(), best_idx)
         return best_idx
 
     _log("no microphone proven to carry audio — falling back to system default")
+    _cache = (time.monotonic(), None)
     return None

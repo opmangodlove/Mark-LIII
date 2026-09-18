@@ -381,6 +381,15 @@ def listen() -> None:
     last_launch = 0.0
     last_quit = 0.0
     dev = pick_input_device()
+    # Device-switch watcher state: when the input-device list changes
+    # (headset powers on/off, mic plugged/unplugged), re-audit and hot-swap
+    # onto the best mic without losing the wake-word listener.
+    try:
+        from core import mic_health as _mh
+        cur_sig = _mh.current_signature()
+    except Exception:
+        _mh = None
+        cur_sig = ""
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
@@ -400,6 +409,37 @@ def listen() -> None:
                 log(f"mic silent {silent_for:.0f}s (max level seen: "
                     f"{mic_state['max_level']}) — restarting audio stream")
                 raise RuntimeError("mic watchdog: no audio for 30s")
+            # Patch: device-switch watcher (the user's request): bluetooth
+            # headset connects → its mic becomes the ear; it powers off →
+            # fall back to the laptop's built-in mic. The signature only
+            # changes when endpoints appear/disappear, so this is one cheap
+            # list call per loop iteration.
+            if _mh is not None and cur_sig:
+                try:
+                    new_sig = _mh.current_signature()
+                    if new_sig and new_sig != cur_sig:
+                        cur_sig = new_sig
+                        new_dev = _mh.pick_input_device()
+                        if new_dev is not None and new_dev != dev:
+                            new_name = ""
+                            try:
+                                new_name = sd.query_devices()[new_dev].get("name", "") or f"#{new_dev}"
+                            except Exception:
+                                pass
+                            log(f"audio devices changed — switching mic "
+                                f"#{dev} -> #{new_dev} {new_name!r}")
+                            if _mh._is_bluetooth(new_name):
+                                _announce("Switching to your headset microphone, sir.")
+                            else:
+                                _announce("Switching to the built-in microphone, sir.")
+                            dev = new_dev
+                            return   # restart listen() on the new device
+                        elif new_dev == dev:
+                            log("audio devices changed — current mic still the best")
+                        else:
+                            log("audio devices changed but nothing hears — keeping current mic")
+                except Exception as e:
+                    log(f"device-switch check failed: {e}")
             if time.time() - last_beat > 60:
                 last_beat = time.time()
                 log(f"alive; mic max level last minute: {mic_state['max_level']}")

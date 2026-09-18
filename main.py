@@ -966,6 +966,33 @@ class JarvisLive:
                 )
             )
 
+    async def _watch_mic_devices(self):
+        """Switch microphones live when devices appear or vanish.
+
+        The user moves between the Bluetooth headset and the laptop's
+        built-in mic; when the input-device list changes, this live session
+        must reconnect on the new device or it keeps listening to a ghost.
+        The launcher does the same job while JARVIS is closed; this covers
+        the session while he is running. Session resumption preserves the
+        conversation across the reconnect."""
+        from core import mic_health
+        sig = mic_health.current_signature()
+        while True:
+            await asyncio.sleep(3)
+            try:
+                new_sig = mic_health.current_signature()
+                if new_sig and new_sig != sig:
+                    sig = new_sig
+                    mic_health._cache = None   # force a fresh audit on reconnect
+                    print("[JARVIS] 🎙 audio device list changed — reconnecting on the new mic")
+                    try:
+                        self.ui.write_log("SYS: Microphone changed — reconnecting on it.")
+                    except Exception:
+                        pass
+                    self._reconnect_event.set()
+            except Exception:
+                continue
+
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
@@ -1701,6 +1728,7 @@ class JarvisLive:
 
                     self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
+                    tg.create_task(self._watch_mic_devices())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())

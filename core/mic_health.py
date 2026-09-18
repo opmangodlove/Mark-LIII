@@ -47,6 +47,36 @@ _STRONG_SIGNAL = 1000
 _cache: tuple[float, int | None] | None = None
 _CACHE_TTL = 5.0
 
+# Devices whose names contain any of these are treated as *preferred* (the
+# user's request: use the Bluetooth headset mic whenever it is connected and
+# actually hears, the laptop's built-in mic otherwise). A preferred device
+# still has to PROVE it carries audio — preference never overrides deafness.
+_BT_HINTS = ("headset", "headphone", "bluetooth", "rockerz", "airpod",
+             "buds", "galaxy buds", "wh-", "jbl", "boat")
+
+
+def current_signature() -> str:
+    """Fingerprint of the current input-device list (index, name, channels).
+
+    Callers compare this over time: a change means a mic was plugged in,
+    powered off or disconnected — the moment to re-audit and switch devices
+    (Bluetooth headset connecting or dying is exactly such a change)."""
+    try:
+        import sounddevice as sd
+        parts = []
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                parts.append(f"{i}:{d.get('name', '')[:40]}:"
+                             f"{d.get('max_input_channels')}")
+        return "|".join(parts)
+    except Exception:
+        return ""
+
+
+def _is_bluetooth(name: str) -> bool:
+    n = (name or "").lower()
+    return any(h in n for h in _BT_HINTS)
+
 
 def _peak_level(dev_idx: int, sr: int, seconds: float) -> int | None:
     """Max int16 amplitude seen on this device, or None if it cannot open."""
@@ -118,7 +148,11 @@ def pick_input_device(logger=None) -> int | None:
     if not inputs:
         return None
 
-    # Candidates in priority order: saved choice, then OS default, then rest.
+    # Candidates in priority order (user request): saved choice first, then
+    # Bluetooth/preferred devices (headset connected → use it), then the OS
+    # default (the laptop's built-in mic), then everything else. Proof of
+    # signal still decides: a connected-but-deaf headset is skipped and the
+    # built-in mic wins even though it is later in the list.
     saved_name = ""
     try:
         from memory.config_manager import get_input_device
@@ -139,6 +173,9 @@ def pick_input_device(logger=None) -> int | None:
             or (devices[idx].get("name") or "").lower()[:24] in saved_name.lower()
 
     priority = [i for i, _ in inputs if _name_matches(i)]
+    priority += [i for i, _ in inputs
+                 if _is_bluetooth(devices[i].get("name") or "")
+                 and i not in priority]
     priority += [i for i, _ in inputs if i == default_in and i not in priority]
     priority += [i for i, _ in inputs if i not in priority]
 

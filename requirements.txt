@@ -60,3 +60,5 @@ wmi;        sys_platform == "win32"
 # macOS / Linux OS actions (volume, brightness, reminders) shell out to native
 # tools (pactl / brightnessctl / osascript / systemd), so no extra Python
 # packages are needed there — nothing Windows-specific is ever pulled in.
+pycaw>=0.2.3
+

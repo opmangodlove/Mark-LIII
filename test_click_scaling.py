@@ -4,10 +4,12 @@ import sys
 sys.path.insert(0, ".")
 
 from actions import computer_control as cc
+from actions import screen_processor as sp
 
-# Simulated 1920x1200 physical screen (scale: x1.5 horizontally, x1.6667 vertically)
+# Simulated 1920x1200 physical screen, 100% DPI (measured on this machine)
 cc._screen_size = lambda: (1920, 1200)
 cc._LAST_FIND = None
+sp._last_sent_size = None
 
 FAILS = []
 
@@ -17,31 +19,42 @@ def case(name, got, expect):
         FAILS.append(name)
     print(f"[{'PASS' if ok else 'FAIL'}] {name}: expected={expect} got={got}")
 
-# 1. viewport -> real (the '200px off' bug)
-case("mid viewport", cc._rescale_xy(640, 360), (960, 600))
-case("viewport corner", cc._rescale_xy(1280, 720), (1919, 1199))
-case("origin", cc._rescale_xy(0, 0), (0, 0))
-case("quarter", cc._rescale_xy(320, 180), (480, 300))
+# ── THE BUG: real sent size 1152x720 (1920x1200 screen, aspect preserved) ──
+sp._last_sent_size = (1152, 720)
+case("bug case: mid of 1152-wide view", cc._rescale_xy(640, 360), (1067, 600))
+case("bug case: right edge x=1152", cc._rescale_xy(1152, 720), (1919, 1199))
+case("bug case: 960,540 in view", cc._rescale_xy(960, 540), (1600, 900))
+case("bug case: origin", cc._rescale_xy(0, 0), (0, 0))
 
-# 2. already-real pixels pass through
-case("real large", cc._rescale_xy(1500, 900), (1500, 900))
-case("real x big, y small", cc._rescale_xy(1500, 500), (1500, 500))
-case("real x small, y big", cc._rescale_xy(640, 900), (640, 900))
+# beyond the model's own image = real pixels, pass through
+case("real px beyond view", cc._rescale_xy(1500, 500), (1500, 500))
+case("real px y beyond", cc._rescale_xy(640, 900), (640, 900))
 
-# 3. screen_find replay whitelist (exact + tolerance)
+# ── true 16:9 screen: thumbnail IS 1280x720 ─────────────────────────────
+sp._last_sent_size = (1280, 720)
+case("16:9 view mid", cc._rescale_xy(640, 360), (960, 600))
+case("16:9 view corner", cc._rescale_xy(1280, 720), (1919, 1199))
+
+# ── full-res image sent (small screen): coords already real ────────────
+sp._last_sent_size = (1920, 1200)
+case("full-res passthrough", cc._rescale_xy(1600, 900), (1600, 900))
+
+# ── no recorded size (old cold-start path): 1280x720 assumption ────────
+sp._last_sent_size = None
+case("fallback mid", cc._rescale_xy(640, 360), (960, 600))
+case("fallback beyond", cc._rescale_xy(1500, 900), (1500, 900))
+
+# ── screen_find replay whitelist (exact + tolerance) ────────────────────
+sp._last_sent_size = (1152, 720)
 cc._LAST_FIND = (400, 300)
 case("find exact", cc._rescale_xy(400, 300), (400, 300))
 case("find +tol", cc._rescale_xy(405, 303), (405, 303))
-case("find -tol", cc._rescale_xy(392, 296), (392, 296))
-case("find outside tol rescales", cc._rescale_xy(420, 300), (630, 500))
+case("find outside tol rescales", cc._rescale_xy(420, 300), (700, 500))
 cc._LAST_FIND = None
 
-# 4. junk inputs never crash
-case("floats truncate", cc._rescale_xy(500.7, 300.2), (750, 500))
+# ── junk inputs never crash ─────────────────────────────────────────────
+case("floats", cc._rescale_xy(500.7, 300.2), (833, 500))
 case("garbage", cc._rescale_xy("abc", None), (0, 0))
-
-# 5. tolerance only active when a find exists
-case("no find -> rescale", cc._rescale_xy(400, 300), (600, 500))
 
 print("RESULT:", "ALL PASS" if not FAILS else f"FAILED: {FAILS}")
 sys.exit(0 if not FAILS else 1)

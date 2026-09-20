@@ -58,3 +58,6 @@ voice-launcher/vosk-model-*/
 # runtime logs
 jlog-*.txt
 voice-launcher/launcher_log*.txt
+
+# ── Learned procedures (personal task memory) ────────────────────────────────
+memory/procedures.json

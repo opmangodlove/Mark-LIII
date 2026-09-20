@@ -72,11 +72,16 @@ def _screen_size() -> tuple[int, int]:
 
 
 def _rescale_xy(x, y) -> tuple[int, int]:
-    """Map a coordinate pair from the vision viewport (max 1280x720) onto the
-    real screen. Pairs larger than the viewport are left alone — they are
-    already real pixels (e.g. handed back by screen_find) — and so are pairs
-    within a few pixels of the latest screen_find result (models replaying
-    those numbers tend to round slightly; measured, not imagined)."""
+    """Map a coordinate pair from the model's view onto the real screen.
+
+    The model answers in pixels of the LAST screen image it was shown. That
+    image is thumbnail()-ed with aspect ratio preserved, so it is NOT
+    necessarily 1280x720: on a 1920x1200 screen it is 1152x720, and assuming
+    1280 put every x ~11% left (up to 192px off — the reported bug). The real
+    sent size (recorded by screen_processor) is used when available; pairs
+    beyond the model's own image must be real pixels (screen_find results)
+    and pass through, as do pairs within a few px of the latest screen_find
+    result."""
     try:
         xi, yi = int(x), int(y)
     except (TypeError, ValueError):
@@ -88,10 +93,21 @@ def _rescale_xy(x, y) -> tuple[int, int]:
     sw, sh = _screen_size()
     if sw <= 0 or sh <= 0:
         return xi, yi
-    if xi <= _VIEW_MAX_W and yi <= _VIEW_MAX_H:
-        return min(max(round(xi * sw / _VIEW_MAX_W), 0), sw - 1), \
-               min(max(round(yi * sh / _VIEW_MAX_H), 0), sh - 1)
-    return xi, yi
+    sent_w = sent_h = 0
+    try:
+        sent = getattr(_sp, "_last_sent_size", None)
+        if sent and sent[0] > 0 and sent[1] > 0:
+            sent_w, sent_h = int(sent[0]), int(sent[1])
+    except Exception:
+        pass
+    if sent_w <= 0 or sent_h <= 0:
+        sent_w, sent_h = _VIEW_MAX_W, _VIEW_MAX_H
+    if sent_w == sw and sent_h == sh:
+        return xi, yi   # full-res image was sent — coords are already real
+    if xi > sent_w or yi > sent_h:
+        return xi, yi   # beyond the model's own image — must be real pixels
+    return min(max(round(xi * sw / sent_w), 0), sw - 1), \
+           min(max(round(yi * sh / sent_h), 0), sh - 1)
 
 def _load_config() -> dict:
     try:
@@ -368,6 +384,23 @@ def _focus_window(title: str) -> str:
 
     return f"focus_window: unknown OS '{os_name}'"
 
+# Cached client: building a fresh genai.Client on every screen_find added
+# latency to every single click task. The key rarely changes — rebuild only
+# when it does.
+_find_client = None
+_find_client_key = ""
+
+
+def _get_find_client():
+    global _find_client, _find_client_key
+    key = _get_api_key()
+    if _find_client is None or _find_client_key != key:
+        from google import genai
+        _find_client = genai.Client(api_key=key)
+        _find_client_key = key
+    return _find_client
+
+
 def _screen_find(description: str) -> tuple[int, int] | None:
     api_key = _get_api_key()
     if not api_key:
@@ -375,17 +408,29 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         return None
 
     try:
-        from google import genai
         from google.genai import types as gtypes
 
         _require_pyautogui()
         w, h  = pyautogui.size()
         img   = pyautogui.screenshot()
-        buf   = io.BytesIO()
-        img.save(buf, format="PNG")
-        image_bytes = buf.getvalue()
+        # Downscale + JPEG: the old full-res PNG was ~2.4 MB and dominated
+        # every screen_find — measured 6-8 s per call, which made single
+        # click tasks take ~30 s. A 1024 px JPEG is ~70 KB (33x smaller) and
+        # far more than enough for 0-1000 normalized coordinates.
+        try:
+            small = img.convert("RGB")
+            small.thumbnail((1024, 1024))
+            buf = io.BytesIO()
+            small.save(buf, format="JPEG", quality=80)
+            image_bytes = buf.getvalue()
+            mime = "image/jpeg"
+        except Exception:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            image_bytes = buf.getvalue()
+            mime = "image/png"
 
-        client = genai.Client(api_key=api_key)
+        client = _get_find_client()
         # Patch: ask for NORMALIZED 0-1000 coordinates explicitly, then scale
         # deterministically. Previously the model chose its own units — some
         # replies were raw pixels, some 0-1000 normalized — and the ambiguity
@@ -403,7 +448,7 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         response = client.models.generate_content(
             model="gemini-flash-lite-latest",
             contents=[
-                gtypes.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                gtypes.Part.from_bytes(data=image_bytes, mime_type=mime),
                 prompt,
             ],
         )

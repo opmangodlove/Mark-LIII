@@ -55,6 +55,11 @@ from memory.memory_manager import (
     save_session_summary, pop_last_session,
     search_memory, set_trim_notifier,
 )
+from memory.procedures import (
+    save_procedure as _save_procedure,
+    mark_used as _mark_procedure_used,
+    render_for_prompt as _render_procedures,
+)
 
 # The file-backed tools (open_app, web_search, browser_control, …) are no longer
 # imported or declared here — they self-describe via a TOOL dict in their own
@@ -329,6 +334,46 @@ TOOL_DECLARATIONS = [
             },
             "required": ["category", "key", "value"]
         }
+    },
+    {
+        "name": "save_procedure",
+        "description": (
+            "Silently store HOW a multi-step task was done, so the same task "
+            "is faster and more reliable next time. Call this ONCE right after "
+            "successfully completing a screen task that took several steps "
+            "(e.g. sending a WhatsApp message, posting a tweet, changing a "
+            "setting). task: short name in the user's words (e.g. 'send "
+            "whatsapp message to someone'). steps: the exact ordered actions "
+            "that worked, each with the element descriptions you used. "
+            "Do NOT announce that you are saving — just call it silently."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "task":  {"type": "STRING", "description": "Short task name in the user's words (e.g. 'send whatsapp message')"},
+                "steps": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": "The exact ordered actions that worked (e.g. open whatsapp, click the search icon, type the contact name, press Enter, click the chat, click the message box, type, press Enter)",
+                },
+            },
+            "required": ["task", "steps"],
+        },
+    },
+    {
+        "name": "mark_procedure_used",
+        "description": (
+            "Silently count that you just replayed a learned procedure. Call "
+            "it after finishing a task that matches one of the LEARNED "
+            "PROCEDURES in your instructions. Never announce it."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "task": {"type": "STRING", "description": "The procedure name as written in LEARNED PROCEDURES"},
+            },
+            "required": ["task"],
+        },
     },
     {
         "name": "recall_memory",
@@ -808,6 +853,14 @@ class JarvisLive:
         parts = [time_ctx, identity_ctx]
         if mem_str:
             parts.append(mem_str)
+        # Learned procedures: how multi-step tasks were done before, so the
+        # next run replays a known-good path instead of re-solving from        # scratch (the difference between ~8 s per step and a fast replay).
+        try:
+            _proc_str = _render_procedures()
+            if _proc_str:
+                parts.append(_proc_str)
+        except Exception:
+            pass
         parts.append(sys_prompt)
 
         cfg = dict(
@@ -870,6 +923,45 @@ class JarvisLive:
                 result=(f"saved memory: {category}/{key}" if key and value
                         else "no key/value given"),
                 ok=bool(key and value),
+                duration_s=time.monotonic() - _t0,
+            )
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": "ok", "silent": True}
+            )
+
+        if name == "save_procedure":
+            task = str(args.get("task", ""))
+            steps = args.get("steps") or []
+            ok = False
+            try:
+                ok = _save_procedure(task, steps)
+            except Exception as _pe:
+                print(f"[Memory] save_procedure failed: {_pe}")
+            if ok:
+                print(f"[Memory] 📋 procedure saved: {task} ({len(steps)} steps)")
+            tool_log.record_tool_event(
+                name=name, args={"task": task, "n_steps": len(steps)},
+                result=(f"saved procedure: {task}" if ok
+                        else "invalid task/steps"),
+                ok=ok, duration_s=time.monotonic() - _t0,
+            )
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": "ok" if ok else "invalid", "silent": True}
+            )
+
+        if name == "mark_procedure_used":
+            try:
+                _mark_procedure_used(str(args.get("task", "")))
+            except Exception:
+                pass
+            tool_log.record_tool_event(
+                name=name, args=args, result="usage counted", ok=True,
                 duration_s=time.monotonic() - _t0,
             )
             if not self.ui.muted:

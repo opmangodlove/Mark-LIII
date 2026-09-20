@@ -69,6 +69,14 @@ _IMG_MAX_W = 1280
 _IMG_MAX_H = 720
 _JPEG_Q    = 82
 
+# Actual (w, h) of the LAST screen image sent to the model. thumbnail()
+# preserves aspect ratio, so a 1920x1200 screen arrives as 1152x720 — NOT
+# 1280x720. computer_control must rescale click coordinates by exactly this
+# size; the old fixed 1280x720 assumption landed every x ~11% left of target
+# (measured: up to 192px off at the right edge of a 1920-wide screen).
+# Camera frames deliberately never touch this — only screen images count.
+_last_sent_size: tuple[int, int] | None = None
+
 
 def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]:
     if not _PIL:
@@ -96,7 +104,15 @@ def _capture_screen() -> tuple[bytes, str]:
         shot     = sct.grab(target)
         png      = mss.tools.to_png(shot.rgb, shot.size)
 
-    return _compress(png, "PNG")
+    out_bytes, out_mime = _compress(png, "PNG")
+    global _last_sent_size
+    try:
+        if _PIL:
+            with PIL.Image.open(io.BytesIO(out_bytes)) as _im:
+                _last_sent_size = (_im.width, _im.height)
+    except Exception:
+        pass
+    return out_bytes, out_mime
 
 
 def _cv2_backend() -> int:

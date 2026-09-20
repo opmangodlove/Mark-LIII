@@ -233,16 +233,6 @@ def get_live_model_candidates() -> list[str]:
     return out
 
 
-def get_openrouter_key() -> str:
-    """OpenRouter API key (text-completions fallback brain), or ''."""
-    return (load_api_keys().get("openrouter_api_key") or "").strip()
-
-
-def save_openrouter_key(key: str) -> None:
-    """Store the OpenRouter key. This file is gitignored — never in code."""
-    _patch_config(openrouter_api_key=(key or "").strip())
-
-
 def get_plugin_enabled(plugin_name: str) -> bool:
     """Plugins are enabled by default the moment they're discovered (opt-out model)."""
     return load_api_keys().get("plugins_enabled", {}).get(plugin_name, True)

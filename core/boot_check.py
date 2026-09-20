@@ -20,8 +20,10 @@ WHY THIS EXISTS
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
+import time
 
 
 def _with_timeout(fn, seconds: float):
@@ -189,6 +191,44 @@ def check_api(timeout_hint: str = "") -> tuple[bool, str, bool]:
         return False, msg[:120], False
 
 
+def check_live_model() -> tuple[bool, str]:
+    """Prove at least one live-voice model is visible to this API key.
+
+    Text generation can answer 200 while the pinned LIVE model has been
+    RETIRED by Google (measured 2026-09-20: 'gemini-3.1-flash-live-preview'
+    vanished, text models kept working) — the assistant then fails to
+    connect and retries forever with a 'healthy' key. This check speaks
+    only when NO known live model is visible: a real configuration problem.
+    Inconclusive results (network busy) never alarm."""
+    try:
+        from memory.config_manager import get_live_model_candidates
+        cands = get_live_model_candidates()
+        key = (load_api_keys().get("gemini_api_key") or "").strip()
+    except Exception:
+        return True, ""   # cannot evaluate — stay silent, main.py re-probes
+
+    def _list_models():
+        import urllib.request
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": key},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return {m.get("name", "") for m in json.loads(
+                resp.read().decode("utf-8", "replace")).get("models", [])}
+
+    try:
+        visible, timed_out = _with_timeout(_list_models, 12.0)
+        if timed_out:
+            return True, ""   # inconclusive
+        if isinstance(visible, set) and any(c in visible for c in cands):
+            return True, ""
+        return False, ("Sir, voice check failed. None of my voice models are "
+                       "available on this API key anymore.")
+    except Exception:
+        return True, ""       # inconclusive — never alarm on a busy network
+
+
 def check_screen() -> tuple[bool, str]:
     """Prove screen capture produces real bytes."""
     try:
@@ -210,8 +250,45 @@ def run(ui=None) -> list[str]:
 
     mic_idx, _mic_name = check_microphone()
     if mic_idx is None:
-        failures.append("Sir, microphone check failed. "
-                        "I could not find a microphone that hears anything.")
+        # One grace retry: opening a Bluetooth HFP mic starts SCO link setup
+        # whose first seconds are silent, and the wake-word launcher may hold
+        # the same mic — both make a healthy mic read "dead" on the first
+        # probe. Verify the verdict before alarming anyone.
+        print("[BootCheck] mic unverified — grace retry in 2.5s (SCO/contention)")
+        time.sleep(2.5)
+        try:
+            from core import mic_health as _mh
+            _mh._cache = None
+        except Exception:
+            pass
+        mic_idx, _mic_name = check_microphone()
+    if mic_idx is None:
+        # Distinguish "no mic exists" from "a mic exists but the probe cannot
+        # prove it hears". Measured false negatives (SCO setup, capture
+        # contention with the launcher) make a spoken alarm wrong more often
+        # than right — the app runs on the system default either way, and the
+        # HUD + launcher log show the truth. Alarm only for the true disaster:
+        # zero input devices at all.
+        n_inputs = -1
+        try:
+            import sounddevice as sd
+            n_inputs = sum(1 for d in sd.query_devices()
+                           if d.get("max_input_channels", 0) > 0)
+        except Exception:
+            pass
+        if n_inputs == 0:
+            failures.append("Sir, microphone check failed. "
+                            "No microphone is connected at all.")
+        else:
+            print("[BootCheck] mic probe unverified but an input device exists "
+                  f"({n_inputs}) — running on system default, NOT spoken")
+            try:
+                if ui is not None:
+                    ui.write_log("SYS: Boot check - mic unverified by probe; "
+                                 "running on system default.")
+                    ui.set_mic_info("system default (unverified)")
+            except Exception:
+                pass
 
     api_ok, api_why, api_transient = check_api()
     if not api_ok and not api_transient:
@@ -224,6 +301,10 @@ def run(ui=None) -> list[str]:
                 ui.write_log(f"SYS: Boot check note - {api_why}")
         except Exception:
             pass
+
+    live_ok, live_why = check_live_model()
+    if not live_ok:
+        failures.append(live_why)
 
     screen_ok, screen_why = check_screen()
     if not screen_ok:

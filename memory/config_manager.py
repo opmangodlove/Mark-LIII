@@ -179,6 +179,70 @@ def save_output_device(name: str) -> None:
     _patch_config(output_device=(name or "").strip())
 
 
+# ── Microphone preference ────────────────────────────────────────────────────
+# '' = auto (Bluetooth headset when connected, built-in otherwise). 'bluetooth'
+# = always prefer a Bluetooth/headset mic; 'builtin' = always prefer the
+# laptop's own microphone. The preference only REORDERS candidates — a chosen
+# mic must still prove it carries audio before it is used (mic_health).
+
+
+def get_mic_preference() -> str:
+    """'bluetooth' | 'builtin' | '' (auto). Anything else collapses to auto."""
+    v = (load_api_keys().get("mic_preference", "") or "").strip().lower()
+    return v if v in ("bluetooth", "builtin") else ""
+
+
+def save_mic_preference(pref: str) -> None:
+    """Persist the user's mic choice ('use my headset mic' etc.). Unknown
+    values are stored as auto so a typo can never wedge the mic picker."""
+    v = (pref or "").strip().lower()
+    if v not in ("bluetooth", "builtin"):
+        v = ""
+    _patch_config(mic_preference=v)
+
+
+# ── Live voice model ──────────────────────────────────────────────
+# Google RETIRES preview models: this setup pinned 'gemini-3.1-flash-live-
+# preview', which vanished from the API while every text model kept working —
+# the assistant went mute with a 'healthy' key (measured 2026-09-20). The
+# stable '-latest' alias comes first; retired previews stay as fallbacks in
+# case they return. A config override (api_keys.json: 'live_model') wins.
+LIVE_MODEL_DEFAULTS = [
+    "models/gemini-2.5-flash-native-audio-latest",
+    "models/gemini-3.1-flash-live-preview",
+    "models/gemini-2.5-flash-native-audio-preview-09-2025",
+]
+
+
+def get_live_model_candidates() -> list[str]:
+    """Live-voice models to try, config override first, deduplicated."""
+    cands: list[str] = []
+    try:
+        v = (load_api_keys().get("live_model") or "").strip()
+        if v:
+            cands.append(v if v.startswith("models/") else f"models/{v}")
+    except Exception:
+        pass
+    cands.extend(LIVE_MODEL_DEFAULTS)
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def get_openrouter_key() -> str:
+    """OpenRouter API key (text-completions fallback brain), or ''."""
+    return (load_api_keys().get("openrouter_api_key") or "").strip()
+
+
+def save_openrouter_key(key: str) -> None:
+    """Store the OpenRouter key. This file is gitignored — never in code."""
+    _patch_config(openrouter_api_key=(key or "").strip())
+
+
 def get_plugin_enabled(plugin_name: str) -> bool:
     """Plugins are enabled by default the moment they're discovered (opt-out model)."""
     return load_api_keys().get("plugins_enabled", {}).get(plugin_name, True)

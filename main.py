@@ -71,6 +71,7 @@ from actions.background_monitor import (
 from actions.web_search        import _news as _fetch_news_sync
 from memory.config_manager     import (
     get_brief_enabled, get_voice, get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
+    get_live_model_candidates,
 )
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
@@ -94,8 +95,55 @@ def get_base_dir():
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
-LIVE_MODEL          = "models/gemini-3.1-flash-live-preview"
+# Live-voice model candidates (single source with boot_check). The first
+# candidate this API key can actually SEE is used — preview models get
+# retired by Google, and a pinned name then 404s forever (measured).
+LIVE_MODEL          = get_live_model_candidates()[0]
 CHANNELS            = 1
+
+# Chosen live model (cached per process). A dict so the reconnect error
+# handler can invalidate it without a `global` statement deep in a method.
+_LIVE_MODEL_STATE: dict = {"chosen": None}
+
+
+def _choose_live_model() -> str:
+    """First live-voice model this API key can actually see (cached).
+
+    Google retires preview live models: this setup's pinned
+    'gemini-3.1-flash-live-preview' vanished while every text model kept
+    working, so the assistant went mute with a 'healthy' key (measured
+    2026-09-20). One cheap HTTPS call per process prevents exactly that."""
+    if _LIVE_MODEL_STATE["chosen"]:
+        return _LIVE_MODEL_STATE["chosen"]
+    cands = get_live_model_candidates()
+    try:
+        import urllib.request
+        key = ""
+        try:
+            key = json.loads(API_CONFIG_PATH.read_text(encoding="utf-8")).get(
+                "gemini_api_key", "")
+        except Exception:
+            pass
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            visible = {m.get("name", "") for m in json.loads(
+                resp.read().decode("utf-8", "replace")).get("models", [])}
+        for c in cands:
+            if c in visible:
+                _LIVE_MODEL_STATE["chosen"] = c
+                if c != cands[0]:
+                    print(f"[JARVIS] \u26a0\ufe0f preferred live model unavailable "
+                          f"\u2014 using {c}")
+                return c
+        print("[JARVIS] \u26a0\ufe0f no known live model visible to this key "
+              "\u2014 trying the first anyway")
+    except Exception as e:
+        print(f"[JARVIS] live-model visibility check failed ({e}) \u2014 using default")
+    _LIVE_MODEL_STATE["chosen"] = cands[0]
+    return _LIVE_MODEL_STATE["chosen"]
 SEND_SAMPLE_RATE    = 16000 
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
@@ -214,6 +262,29 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "set_microphone",
+        "description": (
+            "Switch which microphone JARVIS listens to. Use when the user says "
+            "things like 'use my headset mic', 'use my bluetooth mic', "
+            "'use the laptop mic', 'use the built-in microphone', 'use the "
+            "default mic', or 'stop switching mics'. "
+            "target: 'bluetooth' for a headset/earbuds microphone, 'builtin' "
+            "for the laptop's own microphone, 'auto' for automatic choice "
+            "(Bluetooth when connected, built-in otherwise). The preference is "
+            "saved and applied immediately."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "target": {
+                    "type": "STRING",
+                    "description": "bluetooth | builtin | auto",
+                },
+            },
+            "required": ["target"],
         },
     },
     {
@@ -808,6 +879,51 @@ class JarvisLive:
                 response={"result": "ok", "silent": True}
             )
 
+        if name == "set_microphone":
+            target = str(args.get("target", "")).lower().strip()
+            canon = {
+                "bluetooth": "bluetooth", "headset": "bluetooth",
+                "bt": "bluetooth", "wireless": "bluetooth",
+                "builtin": "builtin", "built-in": "builtin",
+                "laptop": "builtin", "internal": "builtin",
+                "default": "auto", "system": "auto", "auto": "auto",
+                "automatic": "auto",
+            }.get(target, "")
+            if not canon:
+                result_msg = "Which microphone, sir — the headset or the laptop's own?"
+                ok = False
+            else:
+                from memory.config_manager import save_mic_preference
+                save_mic_preference(canon)
+                try:
+                    from core import mic_health as _mh
+                    _mh._cache = None
+                    _mh._known_good = None
+                except Exception:
+                    pass
+                self.ui.write_log(f"SYS: Microphone preference set to {canon}.")
+                self.ui.flash_mic("mic choice: " + canon)
+                result_msg = (f"Microphone preference saved: {canon}. "
+                              "Switching to it now.")
+                ok = True
+                # The reconnect re-runs mic selection, which now honours the
+                # saved preference — same path as a device hot-swap, the
+                # conversation is kept.
+                try:
+                    self._reconnect_event.set()
+                except Exception:
+                    pass
+            tool_log.record_tool_event(
+                name=name, args=args, result=result_msg, ok=ok,
+                duration_s=time.monotonic() - _t0,
+            )
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": result_msg, "silent": False}
+            )
+
         loop   = asyncio.get_event_loop()
         result = "Done."
 
@@ -998,6 +1114,18 @@ class JarvisLive:
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            # HUD cosmetics run for EVERY chunk, before any gate: the mic
+            # indicator must stay honest while asleep, muted, or while JARVIS
+            # is speaking — a stuck "mic detecting…" or a false "NOT HEARING"
+            # while asleep is exactly the confusion the indicator exists to
+            # prevent. Purely cosmetic; failures here never disturb the mic.
+            try:
+                self.ui.set_audio_level(_pcm_level(indata))
+                # Raw int16 peak marks the HUD indicator as 'hearing' only
+                # when above digital-silence level.
+                self.ui.set_mic_signal(int(np.abs(indata).max()))
+            except Exception:
+                pass
             # ── Wake-word gate ───────────────────────────────────────────────
             # While asleep, the mic audio NEVER goes to Gemini (nothing is
             # streamed, so JARVIS can't respond to speech not addressed to it and
@@ -1024,16 +1152,6 @@ class JarvisLive:
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm"}
                 )
-                # Feed the live mic level to the HUD so the waveform reacts to
-                # the user's actual voice while listening. Purely cosmetic — any
-                # failure here must never disturb the mic.
-                try:
-                    self.ui.set_audio_level(_pcm_level(indata))
-                    # HUD mic-health: raw int16 peak marks the indicator as
-                    # 'hearing' only when above digital-silence level.
-                    self.ui.set_mic_signal(int(np.abs(indata).max()))
-                except Exception:
-                    pass
 
         try:
             def _open_mic(dev):
@@ -1090,6 +1208,33 @@ class JarvisLive:
                     f"SYS: Microphone '{_mic_name}' unavailable — using system default."
                 )
                 _mic_stream = _open_mic(None)
+
+            # ALWAYS name the mic on the HUD — even when the probe could not
+            # verify signal (SCO setup, capture contention). The open stream
+            # knows which device it really holds; "mic detecting…" must never
+            # outlive boot. A device CHANGE across reconnects flashes the
+            # HUD badge so the user always knows which mic is in use.
+            try:
+                _real_idx = getattr(_mic_stream, "device", None)
+                if _real_idx is None or _real_idx < 0:
+                    _real_idx = sd.default.device[0]
+                _vname = (sd.query_devices()[_real_idx].get("name") or "") or f"device #{_real_idx}"
+                # Record the proven mic so the wake-word launcher (and any
+                # future session) adopts this device instead of mis-probing
+                # it under Bluetooth driver contention.
+                try:
+                    from core import mic_health as _mh_share
+                    _mh_share.write_shared_mic(_vname)
+                except Exception:
+                    pass
+                self.ui.set_mic_info(_vname)
+                _prev = getattr(self, "_last_mic_name", "")
+                if _prev and _vname != _prev:
+                    self.ui.flash_mic(f"switched to {_vname[:34]}")
+                    self.ui.write_log(f"SYS: Microphone switched to {_vname}")
+                self._last_mic_name = _vname
+            except Exception:
+                pass
 
             with _mic_stream:
                 print("[JARVIS] 🎤 Mic stream open")
@@ -1688,7 +1833,7 @@ class JarvisLive:
                 )
 
                 async with (
-                    client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
+                    client.aio.live.connect(model=_choose_live_model(), config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session          = session
@@ -1790,6 +1935,16 @@ class JarvisLive:
                 err_str = str(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
                 traceback.print_exc()
+
+                # Live model retired/unavailable (preview models get removed
+                # by Google) — forget the cached choice so the next reconnect
+                # re-probes the model list and picks a visible one.
+                if ("404" in err_str or "not found" in err_str.lower()
+                        or "not supported" in err_str.lower()
+                        or "not available" in err_str.lower()):
+                    _LIVE_MODEL_STATE["chosen"] = None
+                    self.ui.write_log(
+                        "SYS: Voice model unavailable — trying the next known model.")
 
                 # Proactive audio rejected by the server (preview API drift) —
                 # drop it and reconnect with the plain config.

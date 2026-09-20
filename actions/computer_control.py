@@ -52,6 +52,7 @@ _MEMORY_PATH  = _BASE / "memory" / "long_term.json"
 # Coordinates that exactly match the most recent screen_find result are also
 # passed through untouched — those are known-real pixels being replayed.
 _LAST_FIND: tuple[int, int] | None = None
+_FIND_TOL = 8   # px tolerance when replaying a screen_find result
 try:
     from actions import screen_processor as _sp
     _VIEW_MAX_W = int(getattr(_sp, "_IMG_MAX_W", 1280))
@@ -74,13 +75,16 @@ def _rescale_xy(x, y) -> tuple[int, int]:
     """Map a coordinate pair from the vision viewport (max 1280x720) onto the
     real screen. Pairs larger than the viewport are left alone — they are
     already real pixels (e.g. handed back by screen_find) — and so are pairs
-    exactly matching the latest screen_find result."""
+    within a few pixels of the latest screen_find result (models replaying
+    those numbers tend to round slightly; measured, not imagined)."""
     try:
         xi, yi = int(x), int(y)
     except (TypeError, ValueError):
         return 0, 0
-    if _LAST_FIND is not None and (xi, yi) == _LAST_FIND:
-        return xi, yi
+    if _LAST_FIND is not None:
+        lx, ly = _LAST_FIND
+        if abs(xi - lx) <= _FIND_TOL and abs(yi - ly) <= _FIND_TOL:
+            return xi, yi
     sw, sh = _screen_size()
     if sw <= 0 or sh <= 0:
         return xi, yi
@@ -410,15 +414,21 @@ def _screen_find(description: str) -> tuple[int, int] | None:
 
         match = re.search(r"(\d+)\s*,\s*(\d+)", text)
         if match:
-            # The prompt demands 0-1000 normalized coordinates; scale them to
-            # real pixels. Values >1000 (model ignored the format) are clamped
-            # so a wild reply can never click off-screen.
             x, y = int(match.group(1)), int(match.group(2))
             if x > 1000 or y > 1000:
-                print(f"[ComputerControl] screen_find ignored out-of-range reply: {text[:40]!r}")
-                return None
-            px = min(max(round(x * w / 1000), 0), w - 1)
-            py = min(max(round(y * h / 1000), 0), h - 1)
+                # Model ignored the normalized format but may have replied
+                # REAL pixels (its other measured habit). Accept them when
+                # they fit on the screen — an exact real-pixel click beats
+                # refusing — and reject only what would land off-screen.
+                if x < w and y < h:
+                    px, py = x, y
+                else:
+                    print(f"[ComputerControl] screen_find ignored "
+                          f"out-of-range reply: {text[:40]!r}")
+                    return None
+            else:
+                px = min(max(round(x * w / 1000), 0), w - 1)
+                py = min(max(round(y * h / 1000), 0), h - 1)
             # Remember the real-pixel result so a raw click replaying these
             # exact numbers is never misread as viewport pixels.
             global _LAST_FIND

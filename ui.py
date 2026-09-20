@@ -406,6 +406,7 @@ class HudCanvas(QWidget):
         self.mic_hearing    = False    # real signal observed recently?
         self._mic_last_rx   = 0.0      # monotonic time of last real signal
         self._mic_seal_t    = 0.0      # last time the SEAL/waveform was checked
+        self._mic_flash     = None     # (text, expiry) transient switch badge
 
         self._tick       = 0
         self._scale      = 1.0
@@ -474,6 +475,12 @@ class HudCanvas(QWidget):
                 self.mic_hearing = True
         except (TypeError, ValueError):
             pass
+
+    def flash_mic(self, text: str) -> None:
+        """Thread-safe: show a transient message on the mic line (device
+        switch, preference change). Reverts to the normal mic line after
+        ~6 s so the badge never hides the ongoing mic-health state."""
+        self._mic_flash = (str(text or "")[:44], time.time() + 6.0)
 
     def _load_face(self, path: str):
         try:
@@ -757,18 +764,29 @@ class HudCanvas(QWidget):
         p.drawText(QRectF(0, sy, W, 26), Qt.AlignmentFlag.AlignCenter, txt)
 
         # Microphone health line — which mic was selected and whether it
-        # actually hears audio right now.
+        # actually hears audio right now. A transient flash message (device
+        # switch / preference change) takes priority for ~6 s, then the
+        # normal state line returns.
         p.setFont(QFont("Courier New", 7))
-        if self.muted:
-            m_txt, m_col = "🔇 mic muted (F4)", qcol(C.MUTED_C)
-        elif not self.mic_name:
-            m_txt, m_col = "🎙 mic: detecting…", qcol(C.BORDER_B)
-        elif self.mic_hearing:
-            short = self.mic_name if len(self.mic_name) <= 28 else self.mic_name[:27] + "…"
-            m_txt, m_col = f"🎙 {short}  ● hearing", qcol(C.GREEN)
-        else:
-            short = self.mic_name if len(self.mic_name) <= 24 else self.mic_name[:23] + "…"
-            m_txt, m_col = f"🎙 {short}  ⚠ NOT HEARING", qcol("#ffaa00")
+        m_txt = m_col = None
+        _fl = getattr(self, "_mic_flash", None)
+        if _fl:
+            _ftxt, _fexp = _fl
+            if time.time() <= _fexp:
+                m_txt, m_col = f"🎙 {_ftxt}", qcol(C.ACC2)
+            else:
+                self._mic_flash = None
+        if m_txt is None:
+            if self.muted:
+                m_txt, m_col = "🔇 mic muted (F4)", qcol(C.MUTED_C)
+            elif not self.mic_name:
+                m_txt, m_col = "🎙 mic: detecting…", qcol(C.BORDER_B)
+            elif self.mic_hearing:
+                short = self.mic_name if len(self.mic_name) <= 28 else self.mic_name[:27] + "…"
+                m_txt, m_col = f"🎙 {short}  ● hearing", qcol(C.GREEN)
+            else:
+                short = self.mic_name if len(self.mic_name) <= 24 else self.mic_name[:23] + "…"
+                m_txt, m_col = f"🎙 {short}  ⚠ NOT HEARING", qcol("#ffaa00")
         # (waveform baseline sits at sy+30 with bars rising ~24px above it;
         # this line goes just below that baseline)
         p.setPen(QPen(m_col, 1))
@@ -4840,6 +4858,15 @@ class JarvisUI:
         """Thread-safe: feed the raw mic peak so the HUD can show 'hearing'"""
         try:
             self._win.hud.set_mic_signal(peak)
+        except Exception:
+            pass
+
+    def flash_mic(self, text: str) -> None:
+        """Thread-safe: flash a transient mic message on the HUD (device
+        switch, preference change) — the user always knows which mic is in
+        use."""
+        try:
+            self._win.hud.flash_mic(text)
         except Exception:
             pass
 

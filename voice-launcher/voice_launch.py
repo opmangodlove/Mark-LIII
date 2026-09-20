@@ -381,6 +381,16 @@ def listen() -> None:
     last_launch = 0.0
     last_quit = 0.0
     dev = pick_input_device()
+    # Record the mic this process actually opened, so the JARVIS app (and
+    # vice versa) can adopt the PROVEN device instead of mis-probing it
+    # under Bluetooth driver contention (mic_health.read_shared_mic).
+    try:
+        from core import mic_health as _mh_share
+        if dev is not None:
+            _mh_share.write_shared_mic(
+                sd.query_devices()[dev].get("name", "") or f"#{dev}")
+    except Exception:
+        pass
     # Device-switch watcher state: when the input-device list changes
     # (headset powers on/off, mic plugged/unplugged), re-audit and hot-swap
     # onto the best mic without losing the wake-word listener.

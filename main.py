@@ -59,6 +59,8 @@ from memory.procedures import (
     save_procedure as _save_procedure,
     mark_used as _mark_procedure_used,
     render_for_prompt as _render_procedures,
+    list_procedures as _list_procedures,
+    forget_procedure as _forget_procedure,
 )
 
 # The file-backed tools (open_app, web_search, browser_control, …) are no longer
@@ -358,6 +360,31 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": ["task", "steps"],
+        },
+    },
+    {
+        "name": "list_procedures",
+        "description": (
+            "List the tasks you have learned how to do. Call this when the "
+            "user asks things like 'what tasks do you know' or 'what have "
+            "you learned'. Then answer BRIEFLY in speech — just name the "
+            "tasks, no step details unless asked."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []},
+    },
+    {
+        "name": "forget_procedure",
+        "description": (
+            "Delete a learned procedure. Call this when the user says things "
+            "like 'forget how to do X' or 'stop remembering the X task'. "
+            "Confirm briefly in speech afterwards."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "task": {"type": "STRING", "description": "The task name to forget (e.g. 'send whatsapp message')"},
+            },
+            "required": ["task"],
         },
     },
     {
@@ -969,6 +996,47 @@ class JarvisLive:
             return types.FunctionResponse(
                 id=fc.id, name=name,
                 response={"result": "ok", "silent": True}
+            )
+
+        if name == "list_procedures":
+            try:
+                procs = _list_procedures()
+            except Exception:
+                procs = {}
+            if not procs:
+                result_msg = "I have not learned any procedures yet."
+            else:
+                result_msg = "Known procedures:\n" + "\n".join(
+                    f"- {t} ({len(v.get('steps', []))} steps, "
+                    f"used {v.get('uses', 0)}x)" for t, v in procs.items())
+            tool_log.record_tool_event(
+                name=name, args={}, result=result_msg, ok=True,
+                duration_s=time.monotonic() - _t0,
+            )
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": result_msg, "silent": False}
+            )
+
+        if name == "forget_procedure":
+            task = str(args.get("task", ""))
+            try:
+                ok = _forget_procedure(task)
+            except Exception:
+                ok = False
+            result_msg = (f"Forgotten: {task}." if ok
+                          else f"I don't have a procedure matching '{task}'.")
+            tool_log.record_tool_event(
+                name=name, args=args, result=result_msg, ok=ok,
+                duration_s=time.monotonic() - _t0,
+            )
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": result_msg, "silent": False}
             )
 
         if name == "set_microphone":

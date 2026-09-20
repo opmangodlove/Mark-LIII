@@ -75,6 +75,25 @@ def mark_used(task: str) -> None:
         _write(data)
 
 
+def forget_procedure(task: str) -> bool:
+    """Delete a procedure by name (exact first, then unique substring).
+    Returns True if something was deleted."""
+    data = _load()
+    key = (task or "").strip().lower()
+    if not key or not data:
+        return False
+    if key in data:
+        data.pop(key)
+        _write(data)
+        return True
+    hits = [k for k in data if key in k]
+    if len(hits) == 1:
+        data.pop(hits[0])
+        _write(data)
+        return True
+    return False   # not found, or ambiguous (never guess)
+
+
 def list_procedures() -> dict:
     return _load()
 

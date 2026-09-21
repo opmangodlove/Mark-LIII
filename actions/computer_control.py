@@ -18,7 +18,7 @@ from pathlib import Path
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE    = 0.05
+    pyautogui.PAUSE    = 0.01   # measured default 0.05 adds ~30% to every move/click
     _PYAUTOGUI = True
 except ImportError:
     _PYAUTOGUI = False
@@ -392,7 +392,7 @@ _find_client_key = ""
 
 
 def _get_find_client():
-    global _find_client, _find_client_key
+    global _find_client, _find_client_key, _find_memo, _find_memo_ts, _find_memo_result
     key = _get_api_key()
     if _find_client is None or _find_client_key != key:
         from google import genai
@@ -401,7 +401,23 @@ def _get_find_client():
     return _find_client
 
 
+# Memo cache for identical screen_find calls within 5 s (see _screen_find).
+_find_memo: str | None        = None
+_find_memo_ts: float          = 0.0
+_find_memo_result: tuple | None = None
+
+
 def _screen_find(description: str) -> tuple[int, int] | None:
+    # 5-second memo: identical descriptions back-to-back (model calls
+    # screen_find then screen_click with the same text) reuse the result
+    # instead of a second 1.5-2 s vision round-trip. Screen changes clear it.
+    global _find_memo, _find_memo_ts
+    now = time.monotonic()
+    if (description == _find_memo
+            and (now - _find_memo_ts) < 5.0):
+        print("[ComputerControl] screen_find memo hit")
+        return _find_memo_result
+
     api_key = _get_api_key()
     if not api_key:
         print("[ComputerControl] ⚠️ No API key for screen_find")
@@ -478,6 +494,8 @@ def _screen_find(description: str) -> tuple[int, int] | None:
             # exact numbers is never misread as viewport pixels.
             global _LAST_FIND
             _LAST_FIND = (px, py)
+            _find_memo, _find_memo_ts = description, now
+            _find_memo_result = (px, py)
             return px, py
 
     except Exception as e:

@@ -55,6 +55,8 @@ from memory.memory_manager import (
     save_session_summary, pop_last_session,
     search_memory, set_trim_notifier,
 )
+from core.self_update import consume_boot_marker as _consume_update_marker
+from core.window_context import context_line as _window_context
 from memory.procedures import (
     save_procedure as _save_procedure,
     mark_used as _mark_procedure_used,
@@ -404,6 +406,17 @@ TOOL_DECLARATIONS = [
             },
             "required": ["task"],
         },
+    },
+    {
+        "name": "update_jarvis",
+        "description": (
+            "Update JARVIS to the latest version. Call this when the user says "
+            "things like 'update yourself', 'update jarvis', 'check for updates', "
+            "or 'install the latest version'. Do NOT call this for Windows or "
+            "app updates — only for JARVIS itself. The update runs and JARVIS "
+            "restarts by himself; just tell the user what is happening."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []},
     },
     {
         "name": "recall_memory",
@@ -1091,6 +1104,24 @@ class JarvisLive:
         result = "Done."
 
         try:
+            if name == "update_jarvis":
+                result = ""
+                ok = False
+                try:
+                    from core import self_update
+                    result = self_update.update_now(logger=lambda m: print(f"[Update] {m}"))
+                    ok = result.startswith("UPDATE_OK")
+                except Exception as _ue:
+                    result = f"Update failed to start: {_ue}"
+                tool_log.record_tool_event(
+                    name=name, args={}, result=result, ok=ok,
+                    duration_s=time.monotonic() - _t0,
+                )
+                return types.FunctionResponse(
+                    id=fc.id, name=name,
+                    response={"result": "Update started. I'll restart and check back in shortly."}
+                )
+
             if name == "recall_memory":
                 # Local file search: no network, no second model. Kept out of
                 # the executor deliberately — it is a dictionary scan over a few
@@ -1929,8 +1960,13 @@ class JarvisLive:
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
+                    # Phone can't see the desktop — give the model the same
+                    # window context the desktop user's eyes provide.
+                    _win = _window_context()
                     await self.session.send_client_content(
-                        turns={"role": "user", "parts": [{"text": text}]},
+                        turns={"role": "user", "parts": [{"text": (
+                            f"{_win}\n{text}" if _win else text
+                        )}]},
                         turn_complete=True,
                     )
                     self.ui.write_log(f"[Web]: {text}")
@@ -2013,6 +2049,22 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
+                    # Self-update boot confirmation: the first thing he says
+                    # after an update tells the user it actually worked.
+                    try:
+                        _upd = _consume_update_marker()
+                        if _upd:
+                            await self.session.send_client_content(
+                                turns={"role": "user", "parts": [{"text": (
+                                    "[SYSTEM] You were just updated to the latest version "
+                                    f"({_upd.get('commits', '?')} new commit(s)) and restarted. "
+                                    "Confirm it in ONE short friendly sentence, then stop. "
+                                    "Do not call any tools."
+                                )}]},
+                                turn_complete=True,
+                            )
+                    except Exception:
+                        pass
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
                         # and "it reconnected and still knows what we were doing"

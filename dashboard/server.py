@@ -393,6 +393,11 @@ def _read(name: str) -> str:
 
 # ── DashboardServer ───────────────────────────────────────────────────────────
 
+# Tailscale-awareness cache (see DashboardServer._tailscale_ip).
+_tailscale_ip_cache: str = ""
+_tailscale_ip_ts: float   = 0.0
+
+
 class DashboardServer:
 
     def __init__(self):
@@ -459,13 +464,45 @@ class DashboardServer:
 
     def get_url(self) -> str:
         proto = "https" if self._ssl_enabled() else "http"
-        return f"{proto}://{self._ip}:{PORT}"
+        return f"{proto}://{self._tailscale_ip() or self._ip}:{PORT}"
 
     def get_manual_url(self) -> str:
-        """URL for manual browser entry. When HTTPS active, points to alias port (also HTTPS)."""
+        """URL for manual browser entry. When HTTPS active, points to alias port (also HTTPS).
+        Prefers the Tailscale IP when the tailnet is up (works from anywhere);
+        falls back to the LAN IP (same Wi-Fi only)."""
+        ip = self._tailscale_ip() or self._ip
         if self._ssl_enabled():
-            return f"{self._ip}:{PORT + 1}"
-        return f"{self._ip}:{PORT}"
+            return f"{ip}:{PORT + 1}"
+        return f"{ip}:{PORT}"
+
+    @staticmethod
+    def _tailscale_ip() -> str:
+        """This machine's tailnet IPv4 (100.x.y.z), or '' when Tailscale is
+        not installed/running/logged in. Cached 60 s — checking costs one
+        UDP datagram, and tailscale stays up for days."""
+        global _tailscale_ip_cache, _tailscale_ip_ts
+        now = time.monotonic()
+        if (_tailscale_ip_cache or _tailscale_ip_ts) and (now - _tailscale_ip_ts) < 60.0:
+            return _tailscale_ip_cache
+        ip = ""
+        try:
+            import subprocess as _sp
+            exe = Path("C:/Program Files/Tailscale/tailscale.exe")
+            if exe.exists():
+                r = _sp.run(
+                    [str(exe), "ip", "-4"], capture_output=True, text=True,
+                    timeout=5,
+                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+                )
+                for line in (r.stdout or "").splitlines():
+                    line = line.strip()
+                    if line.startswith("100."):
+                        ip = line
+                        break
+        except Exception:
+            ip = ""
+        _tailscale_ip_cache, _tailscale_ip_ts = ip, now
+        return ip
 
     def _aes_key(self, session_key: str) -> bytes:
         if session_key not in self._aes_cache:
@@ -533,7 +570,7 @@ class DashboardServer:
             # Server-side header auth can't work here because browser navigations
             # don't send custom headers (location.href doesn't carry Authorization).
             html = (self._app_html
-                    .replace("__IP__", self._ip)
+                    .replace("__IP__", self._tailscale_ip() or self._ip)
                     .replace("__PORT__", str(PORT)))
             return HTMLResponse(html)
 

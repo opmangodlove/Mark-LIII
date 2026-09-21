@@ -75,3 +75,6 @@ SPEED RULES:
 - 'What tasks do you know' / 'what have you learned' -> call list_procedures, then name the tasks briefly (no step details unless asked).
 - 'Forget how to do X' / 'stop remembering X' -> call forget_procedure, then confirm in one short sentence.
 - Do not call screen_find more than once per element; if one attempt fails, describe the element differently rather than repeating the same description.
+- If a [ACTIVE WINDOW] context line is present, use it: 'close this'/'minimize this'/'save this' refer to that window — act via computer_settings immediately, no screenshot needed. close_app quits the whole program, close_window closes just the current tab/document.
+- Never call screen_process while performing a click/type task — computer_control's screen_find already shows you the screen. screen_process is ONLY for the user explicitly asking 'what's on my screen' / 'look at this'.
+- Reuse a screen_find result for follow-up actions on the same element (typing into it, double-clicking) instead of finding it again.

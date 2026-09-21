@@ -419,6 +419,18 @@ TOOL_DECLARATIONS = [
         "parameters": {"type": "OBJECT", "properties": {}, "required": []},
     },
     {
+        "name": "check_internet",
+        "description": (
+            "Run a real internet speed test and speak the measured result. "
+            "Call this when the user says things like 'check my internet', "
+            "'how fast is my internet', 'internet is slow', 'run a speed test', "
+            "or asks whether the WiFi or the PC is the problem. Takes a few "
+            "seconds — tell the user you are checking, then report the number "
+            "you get back plainly."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []},
+    },
+    {
         "name": "recall_memory",
         "description": (
             "Look up a fact you have stored about the user but which is NOT in "
@@ -1120,6 +1132,21 @@ class JarvisLive:
                 return types.FunctionResponse(
                     id=fc.id, name=name,
                     response={"result": "Update started. I'll restart and check back in shortly."}
+                )
+
+            if name == "check_internet":
+                from core import net_check
+                speed_msg = await loop.run_in_executor(None, net_check.run_speed_test)
+                ok_speed = speed_msg.startswith("SPEED_OK")
+                tool_log.record_tool_event(
+                    name=name, args={}, result=speed_msg, ok=ok_speed,
+                    duration_s=time.monotonic() - _t0,
+                )
+                # Strip the internal marker so the model speaks a clean sentence.
+                spoken = speed_msg.replace("SPEED_OK — ", "").replace("SPEED_FAIL — ", "")
+                return types.FunctionResponse(
+                    id=fc.id, name=name,
+                    response={"result": spoken, "silent": False}
                 )
 
             if name == "recall_memory":

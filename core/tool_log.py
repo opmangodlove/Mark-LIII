@@ -15,7 +15,8 @@ import time
 
 _LOCK = threading.Lock()
 _EVENTS: list[dict] = []          # oldest first
-_MAX_EVENTS = 400                 # ~a long afternoon of activity; ring buffer
+_MAX_EVENTS = 2000                # ~a full day of activity; ring buffer
+                                  # (the phone's 24h-history button reads this)
 
 # Argument values longer than this are truncated in the stored copy — the log
 # is for "what did it do", not a data warehouse. Results are clipped harder:
@@ -54,6 +55,16 @@ def record_tool_event(name: str, args: dict | None, result: str, ok: bool,
                 del _EVENTS[: len(_EVENTS) - _MAX_EVENTS]
     except Exception:
         pass  # a logging failure must never break a tool call
+
+
+def events_since(since_ts: float) -> list[dict]:
+    """All tool events with ts >= since_ts, oldest first. Never raises."""
+    try:
+        with _LOCK:
+            return [e for e in _EVENTS
+                    if float(e.get("ts", 0) or 0) >= since_ts]
+    except Exception:
+        return []
 
 
 def recent_events(count: int = 60) -> list[dict]:

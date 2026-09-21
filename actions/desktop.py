@@ -483,7 +483,7 @@ def desktop_control(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "desktop_control",
-    "description": "Controls the desktop: wallpaper, organize, clean, list, stats.",
+    "description": "The Windows DESKTOP surface only: change wallpaper (file or URL), auto-organize or clean desktop icons, list what's on it, usage stats. Use for 'change my wallpaper' and desktop-appearance tasks. NOT for files on disk generally (file_controller).",
     "parameters": {
         "type": "OBJECT",
         "properties": {

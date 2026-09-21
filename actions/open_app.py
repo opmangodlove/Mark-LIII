@@ -276,7 +276,7 @@ def open_app(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "open_app",
-    "description": "Opens any application on the computer. Use this whenever the user asks to open, launch, or start any app, website, or program. Always call this tool — never just say you opened it.",
+    "description": "Launch a locally installed desktop app (WhatsApp, Spotify, Chrome, VS Code, Steam…) via the OS Start launcher. Use when the user says 'open/launch/start X' and X is an app. NOT for websites (browser_control), NOT for files or folders (file_controller), NOT for steps inside an app after it opens (computer_control / send_message handle those). Fire-and-forget: it opens the app and returns — it cannot click or type inside it.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

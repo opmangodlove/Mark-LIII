@@ -383,7 +383,7 @@ def send_message(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "send_message",
-    "description": "Sends a text message via WhatsApp, Telegram, or other messaging platform.",
+    "description": "Send a chat message end-to-end on the user's own WhatsApp/Telegram: focuses or launches the real desktop app, finds the contact, and sends the text. Use whenever the user asks to message/text/WhatsApp someone (e.g. 'WhatsApp Dad I'm late'). Do NOT use to merely open the app (open_app) — but for any request that includes a message to deliver, use THIS, not open_app + computer_control.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

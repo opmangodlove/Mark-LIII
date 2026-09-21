@@ -142,6 +142,10 @@
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
+  <div id="hist-panel" style="display:none;max-height:45vh;overflow:auto;
+       background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+       border-radius:10px;margin:6px 10px;padding:10px;font-size:12px;line-height:1.5;
+       white-space:pre-wrap;word-break:break-word;color:#aeb8c9"></div>
   <main id="feed"></main>
   <footer>
     <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
@@ -150,6 +154,7 @@
     <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
     <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
     <button class="btn btn-send" onclick="doSend()">SEND</button>
+    <button class="btn" onclick="toggleHistory()" title="What JARVIS did in the last 24 hours (fetched once, on demand — never streamed)">📜</button>
   </footer>
 
   <script>
@@ -165,6 +170,40 @@
     function _authFetch(url, opts = {}) {
       opts.headers = Object.assign({}, opts.headers, _authHeader());
       return fetch(url, opts);
+    }
+
+    // ── 24h history — fetched ONLY when the user taps the 📜 button ──────────
+    let _histOpen = false;
+    async function toggleHistory() {
+      const panel = document.getElementById('hist-panel');
+      if (_histOpen) { panel.style.display = 'none'; _histOpen = false; return; }
+      panel.style.display = 'block';
+      panel.textContent = 'Loading 24 h history…';
+      _histOpen = true;
+      try {
+        const r = await _authFetch('/api/history?hours=24');
+        if (r.status === 401) { location.replace('/login'); return; }
+        const d = await r.json();
+        const lines = [];
+        const fmt = ts => new Date((ts || 0) * 1000).toLocaleTimeString();
+        (d.tool_events || []).slice(-200).forEach(e => {
+          lines.push(`${fmt(e.ts)}  ${e.ok ? '✓' : '✗'} ${e.name}` +
+                     (e.duration != null ? ` (${e.duration}s)` : '') +
+                     `  ${String(e.result || '').slice(0, 120)}`);
+        });
+        if (d.activity && d.activity.length) {
+          lines.push('', '── activity ──');
+          d.activity.slice(-100).forEach(a => {
+            if (a.type === 'log') lines.push(`${a.ts ? new Date(a.ts).toLocaleTimeString() : ''}  ${a.speaker || '?'}: ${(a.text || '').slice(0, 140)}`);
+            else if (a.type === 'sys') lines.push(`${a.ts ? new Date(a.ts).toLocaleTimeString() : ''}  ⚙ ${a.text || ''}`);
+          });
+        }
+        panel.textContent = lines.length
+          ? lines.join('\n')
+          : 'No recorded activity in the last 24 hours.';
+      } catch (err) {
+        panel.textContent = 'Could not load history: ' + err;
+      }
     }
 
     // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────

@@ -226,7 +226,9 @@ TOOL_DECLARATIONS = [
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
             "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
+            "When using camera: the live view stays open until user says close it or calls close_camera. "
+            "While driving the computer (clicking/typing tasks), do NOT use this — computer_control's "
+            "screenshot/screen_find already shows you the screen there."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -297,10 +299,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "shutdown_jarvis",
         "description": (
-            "Shuts down the assistant completely. "
-            "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Jarvis. "
-            "The user can say this in ANY language."
+            "Ends the JARVIS assistant session itself (this program). "
+            "Call ONLY when the user clearly wants to close/end JARVIS: "
+            "'shut down Jarvis', 'goodbye', 'that's all', 'exit'. "
+            "Do NOT call for 'restart/shut down my PC' (that is computer_settings) "
+            "or when the user is merely quiet."
         ),
         "parameters": {
             "type": "OBJECT",

@@ -66,6 +66,33 @@ def _get_gemini_key() -> str | None:
     except Exception:
         return None
 
+
+def _load_pairing_key() -> str:
+    """The PERMANENT pairing key, created once and persisted in the gitignored
+    config. It survives JARVIS restarts, so the QR code never expires."""
+    try:
+        import json as _json
+        with open(BASE_DIR / "config" / "api_keys.json", "r", encoding="utf-8") as f:
+            k = (_json.load(f).get("remote_pairing_key") or "").strip().upper()
+            if len(k) >= 6:
+                return k
+    except Exception:
+        pass
+    return ""
+
+
+def _persist_pairing_key(key: str) -> None:
+    try:
+        import json as _json
+        p = BASE_DIR / "config" / "api_keys.json"
+        data = {}
+        if p.exists():
+            data = _json.loads(p.read_text(encoding="utf-8"))
+        data["remote_pairing_key"] = key
+        p.write_text(_json.dumps(data, indent=4), encoding="utf-8")
+    except Exception:
+        pass
+
 _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
 
@@ -378,8 +405,14 @@ class DashboardServer:
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
         self._connect_callback            = None
-        self._pending_keys: dict[str, float] = {}
+        self._pending_keys: dict[str, float] = {}   # (legacy, unused by pairing)
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
+        self._pairing_key: str = _load_pairing_key()
+        if not self._pairing_key:
+            self._pairing_key = ''.join(
+                secrets.choice(_KEY_CHARS) for _ in range(8))
+            _persist_pairing_key(self._pairing_key)
+            print("[Dashboard] permanent pairing key created (stored in config)")
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
@@ -389,11 +422,35 @@ class DashboardServer:
     # ── one-time key management ───────────────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
-        now = time.time()
-        self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
-        key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
-        self._pending_keys[key] = now + expiry_secs
-        return key
+        """Return the permanent pairing key (created once, then persisted).
+
+        The QR code therefore NEVER expires: scanning it always works, even
+        after JARVIS restarts, and it REPLACES the currently paired device —
+        exactly one device controls JARVIS at a time."""
+        if not self._pairing_key:
+            self._pairing_key = ''.join(
+                secrets.choice(_KEY_CHARS) for _ in range(8))
+            _persist_pairing_key(self._pairing_key)
+        return self._pairing_key
+
+    def _pair_device(self) -> tuple[str, str]:
+        """Authenticate exactly one device (single-device policy).
+
+        Every previous auth token and device session is wiped first, so a
+        newly paired phone instantly displaces any older one — and tokens
+        never survive a JARVIS restart (the permanent pairing key does).
+        Returns (auth_token, device_token)."""
+        self._tokens.clear()
+        self._token_keys.clear()
+        self._device_sessions.clear()
+        self._aes_cache.clear()
+        auth_tok = secrets.token_urlsafe(32)
+        dev_tok  = secrets.token_urlsafe(24)
+        self._tokens.add(auth_tok)
+        self._token_keys[auth_tok] = self._pairing_key
+        self._device_sessions[dev_tok] = {"session_key": self._pairing_key}
+        self._aes_key(self._pairing_key)
+        return auth_tok, dev_tok
 
     @staticmethod
     def _ssl_enabled() -> bool:
@@ -436,6 +493,8 @@ class DashboardServer:
 
     async def broadcast(self, msg: dict) -> None:
         self._history.append(msg)
+        if len(self._history) > 500:   # ring — the phone replays the last 50 on connect
+            del self._history[: len(self._history) - 500]
         if len(self._history) > 300:
             self._history = self._history[-300:]
         dead: set[WebSocket] = set()
@@ -482,28 +541,27 @@ class DashboardServer:
         async def login(req: Request):
             body    = await req.json()
             entered = str(body.get("pin", "")).strip().upper()
-            now     = time.time()
-            if entered in self._pending_keys and self._pending_keys[entered] > now:
-                del self._pending_keys[entered]          # one-time use
-                tok = secrets.token_urlsafe(32)
-                self._tokens.add(tok)
-                self._token_keys[tok] = entered
-                self._aes_key(entered)                   # pre-derive & cache
+            # Permanent pairing: the key never expires, and pairing REPLACES
+            # any device paired before it (single-device policy).
+            if entered and entered == self._pairing_key:
+                tok, _dev = self._pair_device()
+                self._aes_key(self._pairing_key)          # pre-derive & cache
                 if self._connect_callback:
                     self._connect_callback()
                 asyncio.create_task(self.broadcast(
-                    {"type": "sys", "text": "Remote connection established."}
+                    {"type": "sys", "text": "Device paired (any previous device was disconnected)."}
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
                 return JSONResponse({"ok": True, "token": tok})
-            return JSONResponse({"ok": False, "error": "Invalid or expired key"},
+            return JSONResponse({"ok": False, "error": "Invalid key"},
                                 status_code=401)
 
         @app.get("/auto-login")
         async def auto_login(key: str = ""):
-            """QR code target — validates one-time key, creates session, redirects phone."""
-            now = time.time()
-            if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
+            """QR code target — permanent key: pairing always works, even after
+            JARVIS restarts, and displaces the previously paired device."""
+            entered = (key or "").strip().upper()
+            if not entered or entered != self._pairing_key:
                 return HTMLResponse("""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
@@ -511,17 +569,12 @@ class DashboardServer:
        display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}
   h2{color:#f87171;margin-bottom:12px}p{color:#5e6a7e;font-size:14px}
 </style></head>
-<body><div><h2>Link Expired</h2>
-<p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
+<body><div><h2>Invalid Key</h2>
+<p>This QR code does not match this JARVIS. Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS for the current QR.</p>
 </div></body></html>""")
 
-            del self._pending_keys[key]
-            tok     = secrets.token_urlsafe(32)
-            dev_tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = key
-            self._aes_key(key)
-            self._device_sessions[dev_tok] = {"session_key": key}
+            tok, dev_tok = self._pair_device()
+            self._aes_key(self._pairing_key)
 
             if self._connect_callback:
                 self._connect_callback()
@@ -603,6 +656,36 @@ class DashboardServer:
             if self._wake_callback:
                 self._wake_callback()
             return JSONResponse({"ok": True})
+
+        @app.get("/api/history")
+        async def history_ep(req: Request, hours: float = 24.0):
+            """ON DEMAND ONLY: what JARVIS did in the last N hours (tool calls
+            + activity log). The phone never polls this by itself — it is
+            fetched only when the user taps the button in settings."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            hours = min(max(hours, 0.1), 168.0)
+            since = time.time() - hours * 3600.0
+            tool_events: list = []
+            try:
+                from core import tool_log
+                tool_events = tool_log.events_since(since)
+            except Exception:
+                pass
+
+            def _entry_ts(e: dict) -> float:
+                try:
+                    from datetime import datetime as _dt
+                    return _dt.fromisoformat(str(e.get("ts"))).timestamp()
+                except Exception:
+                    return 0.0
+
+            activity = [h for h in self._history if _entry_ts(h) >= since]
+            return JSONResponse({
+                "ok": True, "hours": hours,
+                "tool_events": tool_events,
+                "activity": activity,
+            })
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

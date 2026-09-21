@@ -911,7 +911,7 @@ def computer_settings(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_settings",
-    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, brightness and dark mode can be reversed with the `undo` tool.",
+    "description": "One-step OS commands: volume up/down/mute, brightness, mute mic, dark mode, WiFi on/off, restart, shutdown, sleep, lock screen, task manager, window actions (minimize/maximize/fullscreen/snap/switch/close app or window), browser-tab commands (new/close/next/prev tab, refresh, back/forward, zoom), pause/play video, and it can TYPE given text or PRESS a key into whatever is already focused. Use this FIRST for any single quick command — it needs no screen analysis. It does NOT find or click on-screen buttons (computer_control does that) and does NOT open apps (open_app). restart/shutdown/toggle_wifi show a confirmation on screen and do NOT complete until the user presses it — never claim they finished. Volume, brightness and dark mode can be undone with the `undo` tool.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

@@ -587,7 +587,7 @@ def code_helper(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "code_helper",
-    "description": "Writes, edits, explains, runs, or builds code files.",
+    "description": "Single-code-file work: write a script, edit existing code, explain or review code, run it and report output. Use when the user wants code written, changed, explained, or executed. NOT for building entire multi-file projects (dev_agent), NOT for editing non-code files (file_controller), NOT for editing files the user uploaded (file_processor).",
     "parameters": {
         "type": "OBJECT",
         "properties": {

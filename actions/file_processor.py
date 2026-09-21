@@ -839,7 +839,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_processor",
-    "description": "Processes any file that the user has uploaded or dropped onto the interface. Use this when the user refers to an uploaded file and wants an action on it. Supports: images (describe/ocr/resize/compress/convert), PDFs (summarize/extract_text/to_word), Word docs & text files (summarize/fix/reformat/translate), CSV/Excel (analyze/stats/filter/sort/convert), JSON/XML (validate/format/analyze), code files (explain/review/fix/optimize/run/document/test), audio (transcribe/trim/convert/info), video (trim/extract_audio/extract_frame/compress/transcribe/info), archives (list/extract), presentations (summarize/extract_text). ALWAYS call this tool when a file has been uploaded and the user gives a command about it. If the user's command is ambiguous, pick the most logical action for that file type.",
+    "description": "Operate on an UPLOADED file (dropped onto the UI or explicitly shared): summarize PDFs/docs, extract text, convert formats, OCR images, resize/compress images, analyze spreadsheets, transcribe audio, trim video, extract archives. Use whenever the user's command is about a file they uploaded. NOT for the user's own disk files (file_controller) — only uploads.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

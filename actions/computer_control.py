@@ -651,7 +651,7 @@ def computer_control(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_control",
-    "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+    "description": "See the screen and act on what is visible: look at the screen (screenshot), find a described element and get its exact position (screen_find), click it (screen_click), click raw coordinates, double/right-click, drag, scroll, move the mouse, hotkeys, press keys, copy/paste, type into a focused field, wait, clear a field, focus a window. Use when a task needs the CURRENT screen state — clicking a specific button, filling a specific field, anything inside an app window after it is open. One screen look per step: use screen_find → screen_click with the SAME element description. NOT for simple one-step commands (computer_settings), NOT for browsers (browser_control), NOT for launching apps (open_app).",
     "parameters": {
         "type": "OBJECT",
         "properties": {

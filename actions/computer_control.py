@@ -411,7 +411,7 @@ def _screen_find(description: str) -> tuple[int, int] | None:
     # 5-second memo: identical descriptions back-to-back (model calls
     # screen_find then screen_click with the same text) reuse the result
     # instead of a second 1.5-2 s vision round-trip. Screen changes clear it.
-    global _find_memo, _find_memo_ts
+    global _find_memo, _find_memo_ts, _find_memo_result
     now = time.monotonic()
     if (description == _find_memo
             and (now - _find_memo_ts) < 5.0):

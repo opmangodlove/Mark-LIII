@@ -67,3 +67,6 @@ vlog-*.txt
 voice-launcher/current_mic.txt
 config/last_update.json
 clean_exit.flag
+
+# launcher runtime state
+launcher.lock

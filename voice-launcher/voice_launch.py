@@ -19,6 +19,7 @@ Stop:  tray-style — it has no UI; kill it from Task Manager (voice_launch.py)
 
 import difflib
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -334,8 +335,26 @@ def listen() -> None:
     import numpy as np   # noqa: F401  (sounddevice imports it anyway)
 
     if not MODEL_DIR.exists():
-        log(f"FATAL: model missing at {MODEL_DIR}")
-        return
+        # Fresh clone: the model is too big for git, so fetch it on first
+        # boot (~40 MB, one time). If that fails, wake word is dead but the
+        # error now tells the user exactly why instead of silently exiting.
+        log("wake-word model missing — downloading once (about 40 MB)…")
+        try:
+            import io
+            import zipfile
+            import urllib.request
+            _zip_url = (
+                "https://alphacephei.com/vosk/models/"
+                "vosk-model-small-en-us-0.15.zip"
+            )
+            with urllib.request.urlopen(_zip_url, timeout=60) as resp:
+                _buf = io.BytesIO(resp.read())
+            with zipfile.ZipFile(_buf) as zf:
+                zf.extractall(BASE_DIR)
+            log(f"model downloaded -> {MODEL_DIR}")
+        except Exception as exc:
+            log(f"FATAL: model missing at {MODEL_DIR} and download failed: {exc}")
+            return
 
     log("loading speech model…")
     model = Model(str(MODEL_DIR))
@@ -482,6 +501,37 @@ def listen() -> None:
 
 
 if __name__ == "__main__":
+    # Single-instance guard: Windows auto-start plus a manual launch (or a
+    # boot race between two startup entries) can silently run two launchers.
+    # Then ONE wake word spawns TWO JARVISes that fight over the dashboard
+    # port. The lock file holds the first instance's PID; a late second
+    # instance exits quietly. Stale lock (dead PID) is claimed automatically.
+    _lock = BASE_DIR / "launcher.lock"
+    try:
+        _existing = int(_lock.read_text().strip() or 0)
+    except Exception:
+        _existing = 0
+    if _existing:
+        _alive = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {_existing}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if str(_existing) in _alive.stdout:
+            print(f"[voice-launch] another launcher already runs (pid {_existing}) — exiting")
+            sys.exit(0)
+    _lock.write_text(str(os.getpid()))
+    # Race verification: two instances started in the same second both see
+    # no lock, both write. The LAST writer wins — everyone else re-reads,
+    # sees a foreign PID, and exits. Exactly one survivor, every time.
+    time.sleep(0.7)
+    try:
+        if int(_lock.read_text().strip() or 0) != os.getpid():
+            print("[voice-launch] lost the startup race — another launcher owns the lock — exiting")
+            sys.exit(0)
+    except Exception:
+        pass
+
     # A flag surviving from a previous launcher run says nothing about the
     # JARVIS run that follows — crashes since then must be revivable.
     _clear_clean_exit()

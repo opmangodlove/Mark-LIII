@@ -187,6 +187,17 @@ def match_any(text: str, phrases: list[str]) -> bool:
 
 def launch_jarvis() -> None:
     log("launch phrase heard — starting JARVIS")
+    # Single-instance guard: the revival monitor, a repeated wake word, and a
+    # manual start can all fire within seconds of each other. Spawning into
+    # that race produced the recurring "two JARVISes fighting over port 8000".
+    # If a healthy instance already exists, there is nothing to launch.
+    try:
+        existing = jarvis_pids()
+    except Exception:
+        existing = []
+    if existing:
+        log(f"JARVIS already running (pid {', '.join(existing)}) — not spawning a second copy")
+        return
     if not PYTHONW.exists():
         log(f"ERROR: python not found at {PYTHONW}")
         return

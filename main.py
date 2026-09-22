@@ -2008,8 +2008,11 @@ class JarvisLive:
     # ── main loop ───────────────────────────────────────────────────────────
 
     async def run(self):
+        _crumb = _boot_crumb
+        _crumb("run() entered")
         self._loop = asyncio.get_event_loop()
         self._reconnect_event = asyncio.Event()
+        _crumb("loop + event ready")
 
         # ── Wire the shared core services to the interface ───────────────────
         # The confirmation gate is useless without a way to ask, and a memory
@@ -2030,21 +2033,28 @@ class JarvisLive:
         # Enumerate audio devices off-thread. The settings drawer must never pay
         # for host-API enumeration on the Qt thread.
         audio_devices.prefetch()
+        _crumb("devices configured + prefetch fired")
 
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
         try:
             from dashboard.server import DashboardServer
+            _crumb("dashboard module imported")
             self._dashboard = DashboardServer()
+            _crumb("dashboard constructed")
+            self._dashboard.set_log_target(self.ui)
             self._dashboard.set_connect_callback(self._on_phone_connected)
             asyncio.create_task(self._dashboard.serve())
+            _crumb("dashboard serve task created")
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
+            _crumb(f"dashboard FAILED: {e}")
 
         while True:
             try:
+                _crumb("session loop entered")
                 print("[JARVIS] Connecting...")
                 self.ui.set_state("THINKING")
                 _resumed_with = self._resume_handle is not None
@@ -2268,6 +2278,17 @@ def main():
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
+        except Exception:
+            # Under pythonw there is no console — without this file, a silent
+            # session death is completely invisible (the GUI keeps running).
+            traceback.print_exc()
+            try:
+                crash_path = Path(__file__).resolve().parent / "logs" / "runner-crash.log"
+                crash_path.parent.mkdir(exist_ok=True)
+                crash_path.write_text(traceback.format_exc(), encoding="utf-8")
+                ui.write_log("SYS: Session crashed — see logs/runner-crash.log")
+            except Exception:
+                pass
 
     threading.Thread(target=runner, daemon=True).start()
     ui.on_app_close(_mark_clean_exit)
@@ -2283,5 +2304,50 @@ def _mark_clean_exit(*_a) -> None:
     except Exception:
         pass
 
+def _boot_crumb(msg: str) -> None:
+    """Timestamped breadcrumb to logs/boot.log. Under pythonw, prints vanish —
+    and when the session loop parks silently, this is the only way to see
+    exactly where boot stopped."""
+    try:
+        p = Path(__file__).resolve().parent / "logs" / "boot.log"
+        p.parent.mkdir(exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} pid={os.getpid()} {msg}\n")
+    except Exception:
+        pass
+
+
+def _another_jarvis_running() -> bool:
+    """True when a *different* process is already running this very file.
+    Guards against duplicate spawns (revival monitor racing a wake word, a
+    double launch, a manual start colliding with an auto-start)."""
+    me = os.getpid()
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' OR Name='python.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'main\\.py' -and $_.CommandLine -notmatch 'voice_launch' } | "
+             "ForEach-Object { Write-Output $_.ProcessId }"],
+            capture_output=True, text=True, timeout=20,
+            creationflags=_subprocess.CREATE_NO_WINDOW,
+        ).stdout.split()
+    except Exception:
+        return False   # never block boot on a probe failure
+    for tok in out:
+        try:
+            if int(tok.strip().strip(',')) != me:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 if __name__ == "__main__":
+    # Duplicate-instance guard: the revival monitor, a wake word and a manual
+    # start can collide. A second copy must never fight the first for port
+    # 8000 — it exits quietly instead.
+    if _another_jarvis_running():
+        print("[JARVIS] Another instance is already running — exiting.", flush=True)
+        _mark_clean_exit()   # don't let the monitor read this exit as a crash
+        _sys.exit(0)
     main()

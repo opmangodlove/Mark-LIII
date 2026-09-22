@@ -413,6 +413,7 @@ class DashboardServer:
         self._pending_keys: dict[str, float] = {}   # (legacy, unused by pairing)
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._pairing_key: str = _load_pairing_key()
+        self._log = None   # optional UI handle — see set_log_target()
         if not self._pairing_key:
             self._pairing_key = ''.join(
                 secrets.choice(_KEY_CHARS) for _ in range(8))
@@ -465,6 +466,29 @@ class DashboardServer:
     def get_url(self) -> str:
         proto = "https" if self._ssl_enabled() else "http"
         return f"{proto}://{self._tailscale_ip() or self._ip}:{PORT}"
+
+    def _log_failure(self, msg: str) -> None:
+        """Record a dashboard failure where it can actually be seen. Under
+        pythonw, print() goes nowhere — which is exactly why a dead dashboard
+        stayed a mystery for a whole session."""
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  [dashboard] {msg}"
+        print(line, flush=True)
+        try:
+            (BASE_DIR / "logs").mkdir(exist_ok=True)
+            with open(BASE_DIR / "logs" / "dashboard.log", "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+        try:
+            if self._log is not None:
+                self._log.write_log(f"SYS: Dashboard problem — {msg}")
+        except Exception:
+            pass
+
+    def set_log_target(self, ui) -> None:
+        """Give the server a handle to the desktop UI log so failures are
+        visible in-app, not just on disk."""
+        self._log = ui
 
     def get_manual_url(self) -> str:
         """URL for manual browser entry. When HTTPS active, points to alias port (also HTTPS).
@@ -887,6 +911,19 @@ class DashboardServer:
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
+        """Public entry — never lets an exception vanish. Under pythonw a
+        dying asyncio task is 100% silent; this turns any crash into a line
+        in logs/dashboard.log with the full traceback."""
+        try:
+            await self._serve_impl()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            import traceback as _tb
+            self._log_failure("serve() crashed:\n" + _tb.format_exc())
+            raise
+
+    async def _serve_impl(self) -> None:
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
@@ -903,12 +940,56 @@ class DashboardServer:
         if use_ssl:
             asyncio.create_task(self._serve_alias())
 
+        # Bind the port ourselves — with retry — and hand the live socket to
+        # uvicorn. Two reasons: uvicorn swallows its own bind failure as a
+        # silent exit (the dashboard died invisibly for a whole session after
+        # any boot-time port collision), and a probe-then-release pattern
+        # races the OS releasing the port, which uvicorn then loses.
+        bound = None
+        last_err = None
+        for attempt in range(10):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", PORT))
+                s.listen(2048)
+                bound = s
+                break
+            except OSError as e:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+                last_err = e
+                if attempt == 0:
+                    self._log_failure(f"port {PORT} busy ({e}) — retrying for ~12s")
+                await asyncio.sleep(1.2)
+        if bound is None:
+            self._log_failure(
+                f"GAVE UP: port {PORT} still held after 12s ({last_err}). Dashboard "
+                f"OFF this session. Holder: netstat -ano | findstr :{PORT}"
+            )
+            return
+
         cfg = uvicorn.Config(
-            self.app, host="0.0.0.0", port=PORT, log_level="warning",
+            self.app, log_level="warning",
+            # use_colors=False: under pythonw sys.stderr is None, and
+            # uvicorn's color auto-detection calls sys.stderr.isatty() while
+            # building its logging formatters — crashing the dashboard task
+            # silently. This was THE reason the site never worked when
+            # JARVIS was launched normally.
+            use_colors=False,
             **({"ssl_keyfile": str(ssl_key), "ssl_certfile": str(ssl_cert)} if use_ssl else {}),
         )
 
         proto = "https" if use_ssl else "http"
         print(f"[Dashboard] {proto}://{self._tailscale_ip() or self._ip}:{PORT}")
         print("[Dashboard] Press 'Remote Control' in JARVIS UI to get the QR code.")
-        await uvicorn.Server(cfg).serve()
+        try:
+            # Hand uvicorn the already-bound socket — its own bind path fails
+            # silently, and re-binding after a probe races the OS.
+            await uvicorn.Server(cfg).serve(sockets=[bound])
+        except Exception as e:
+            # uvicorn's own bind error dies silently under pythonw — leave evidence.
+            self._log_failure(f"uvicorn serve() crashed: {e!r}")
+            raise

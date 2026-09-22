@@ -14,7 +14,7 @@ except ImportError:
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE    = 0.06
+    pyautogui.PAUSE    = 0.01   # shared pyautogui global — keep every module consistent
     _PYAUTOGUI = True
 except ImportError:
     _PYAUTOGUI = False

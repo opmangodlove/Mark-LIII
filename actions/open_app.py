@@ -102,11 +102,11 @@ def _launch_windows(app_name: str) -> bool:
 
     try:
         import pyautogui
-        pyautogui.PAUSE = 0.1
+        pyautogui.PAUSE = 0.01   # was 0.1 — the shared global slowed every module's clicks after this ran
         pyautogui.press("win")
         time.sleep(0.7)
-        pyautogui.write(app_name, interval=0.05)
-        time.sleep(0.9)
+        pyautogui.write(app_name, interval=0.03)
+        time.sleep(0.7)
         pyautogui.press("enter")
         time.sleep(2.5)
         return True

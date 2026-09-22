@@ -250,6 +250,94 @@ _PSEUDO_DEVICES = (
 )
 
 
+def is_bluetooth(name: str) -> bool:
+    """True for Bluetooth audio endpoints.
+
+    Used by main.py's output keep-alive: a Bluetooth headset that no process
+    holds open drops into its low-power state, and every new sound then pays
+    the HFP/HSP profile renegotiation — a second of loud, harsh, broken audio
+    before quality settles. Windows spells Bluetooth transport names in many
+    ways; these tokens cover the observed ones.
+    """
+    low = (name or "").lower()
+    return any(tok in low for tok in (
+        "bluetooth", "bth", "hands-free", "handsfree", "hfp", "hsp",
+        "a2dp", "wireless",
+    ))
+
+
+def keep_output_alive(dev: int | None = None, get_samplerate=lambda: 24000) -> None:
+    """Stop the Bluetooth-speaker quality glitch (loud / broken / drops for a
+    few seconds, repeatedly) at its actual source.
+
+    WHY IT HAPPENS
+        A Bluetooth headset runs in one of two modes: A2DP (high-quality
+        playback) and HFP/HSP (low-quality hands-free, used when a MIC on the
+        headset is recorded). Windows silently tears the link down whenever no
+        application holds the output open, and silently rebuilds it when a new
+        stream starts — the profile renegotiation is audible as a burst of
+        wrong-volume, crackling audio that 'fixes itself' after a few seconds.
+        JARVIS opens and closes streams per session and stays quiet between
+        replies, so the user lives inside that renegotiation cycle all day.
+        It also fires when OTHER apps (Spotify, YouTube) open/close the
+        device — which is why closing JARVIS was the only thing that stopped
+        it: not because JARVIS alone caused it, but because his keep-open
+        habit was inconsistent.
+
+    THE FIX
+        Keep a permanent, silent output stream open on the speaker for the
+        lifetime of the app. A held stream pins the link; nothing
+        renegotiates; every sound — JARVIS's or any other app's — plays clean
+        from the first sample. The stream writes nothing: it merely exists.
+
+    Runs on a daemon thread. Failures are swallowed: a keep-alive that cannot
+    open must never disturb real audio. If the device vanishes (headset off),
+    it retries on the default device and re-pins when Bluetooth returns.
+    """
+    def _run():
+        import sounddevice as sd
+        reported = False
+        while True:
+            try:
+                st = sd.RawOutputStream(
+                    samplerate=int(get_samplerate()),
+                    channels=1, dtype="int16", blocksize=4800,
+                    device=dev,
+                )
+                st.start()
+                if not reported:
+                    try:
+                        name = ""
+                        try:
+                            idx = st.device
+                            name = (sd.query_devices()[idx].get("name") or "") \
+                                if idx is not None and idx >= 0 else ""
+                        except Exception:
+                            pass
+                        print(f"[Audio] 🔵 output keep-alive live on '{name[:48]}' "
+                              "(Bluetooth link pinned — no more audio glitching)")
+                    except Exception:
+                        pass
+                    reported = True
+                # Heartbeat: 10 ms of silence every 10 s proves the stream is
+                # still delivering; a driver that retired the handle causes a
+                # reopen on the next loop pass.
+                while True:
+                    time.sleep(10.0)
+                    try:
+                        st.write(bytes(2 * int(get_samplerate()) // 100))
+                    except Exception:
+                        break
+                try:
+                    st.stop(); st.close()
+                except Exception:
+                    pass
+            except Exception:
+                time.sleep(3.0)   # device gone — retry (pins it again on return)
+
+    threading.Thread(target=_run, name="bt-output-keepalive", daemon=True).start()
+
+
 def _is_pseudo(name: str) -> bool:
     low = name.lower()
     return any(tok in low for tok in _PSEUDO_DEVICES)

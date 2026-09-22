@@ -91,6 +91,7 @@ from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
 from core                      import tool_log
+from memory.conversations       import append_turn as _conv_log
 
 # How long the assistant stays awake with no user speech before it auto-sleeps
 # again (wake-word mode only).
@@ -1529,6 +1530,7 @@ class JarvisLive:
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                _conv_log("You", full_in)
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
@@ -1541,6 +1543,7 @@ class JarvisLive:
                             if full_out:
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
+                                _conv_log(self._asst_name, full_out)
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -1601,6 +1604,27 @@ class JarvisLive:
         _spk_dev  = audio_devices.resolve(_spk_name, "output")
         if _spk_dev is not None:
             print(f"[JARVIS] 🔊 Output device: {_spk_name}")
+
+        # ── Bluetooth output keep-alive (once per process) ─────────────────
+        # A Bluetooth headset tears its audio link down whenever nothing holds
+        # it open and rebuilds it on the next sound — every rebuild is a burst
+        # of loud, broken audio for a few seconds. One permanent silent stream
+        # pins the link; see audio_devices.keep_output_alive for the details.
+        if not getattr(self, "_keepalive_started", False):
+            try:
+                _spk_bt = audio_devices.is_bluetooth(_spk_name or "")
+                if _spk_dev is not None:
+                    try:
+                        _spk_bt = (_spk_bt or audio_devices.is_bluetooth(
+                            sd.query_devices()[_spk_dev].get("name") or ""))
+                    except Exception:
+                        pass
+                if _spk_bt:
+                    audio_devices.keep_output_alive(
+                        _spk_dev, get_samplerate=lambda: RECEIVE_SAMPLE_RATE)
+                    self._keepalive_started = True
+            except Exception:
+                pass
 
         def _open_spk(dev):
             st = sd.RawOutputStream(
@@ -1826,6 +1850,16 @@ class JarvisLive:
         lang = (lang_entry.get("value", "") if isinstance(lang_entry, dict) else str(lang_entry)).strip()
         lang = lang or "English"
 
+        # Adaptive-memory pass: fold the session's conversation into permanent
+        # memory, expire stale temporary notes, and store a recallable pointer
+        # — all before the LLM summary is even requested (zero extra latency
+        # on the audio path; this runs in a background task).
+        try:
+            from memory.auto_memory import adapt_memory_from_session
+            adapt_memory_from_session(log)
+        except Exception as _am_e:
+            print(f"[Memory] adapt pass skipped: {_am_e}")
+
         convo = "\n".join(log[-40:])   # cap at last 40 turns to stay within token budget
         prompt = (
             f"Summarize this conversation in 1-2 sentences in {lang}. "
@@ -1843,6 +1877,13 @@ class JarvisLive:
             summary = (resp.text or "").strip()
             if summary:
                 save_session_summary(summary, lang)
+                # A recallable pointer to the summary lives in permanent memory
+                # so 'what did we talk about' works across sessions.
+                try:
+                    from memory.auto_memory import note_session_summary
+                    note_session_summary(summary)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[Memory] ⚠️ Session summary failed: {e}")
 
@@ -1997,6 +2038,7 @@ class JarvisLive:
                         turn_complete=True,
                     )
                     self.ui.write_log(f"[Web]: {text}")
+                    _conv_log("You (web)", text)   # journal: dashboard commands too
                 else:
                     print(f"[Dashboard] Dropped command (no session): {text}")
             except asyncio.TimeoutError:
@@ -2043,8 +2085,36 @@ class JarvisLive:
             _crumb("dashboard constructed")
             self._dashboard.set_log_target(self.ui)
             self._dashboard.set_connect_callback(self._on_phone_connected)
-            asyncio.create_task(self._dashboard.serve())
-            _crumb("dashboard serve task created")
+
+            async def _dashboard_supervisor() -> None:
+                """Watchdog: the dashboard must outlive any single crash.
+
+                serve() is already hardened (pre-bound socket, use_colors fix,
+                failure log) — but a daemon that dies 'for the rest of the
+                session' leaves a phone site spinning forever in front of a
+                perfectly healthy assistant: the worst kind of failure, since
+                everything else looks fine. This supervisor restarts serve()
+                forever; only app shutdown (CancelledError) ends it.
+                """
+                n = 0
+                while True:
+                    n += 1
+                    try:
+                        await self._dashboard.serve()
+                        # serve() returning on its own means it gave up
+                        # (port busy) or deps are missing — not a crash, but
+                        # the site is equally dead. Retry, slower.
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                    if n <= 3:
+                        self.ui.write_log(
+                            f"SYS: Dashboard stopped — auto-restarting (attempt {n})…")
+                    await asyncio.sleep(min(5.0 * n, 15.0))
+
+            asyncio.create_task(_dashboard_supervisor())
+            _crumb("dashboard serve task created (watchdog-wrapped)")
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())
         except Exception as e:

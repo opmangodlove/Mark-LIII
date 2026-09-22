@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE    = 0.05
+    pyautogui.PAUSE    = 0.01   # shared pyautogui global — was 0.05, making THIS module's import slow every action module down
     _PYAUTOGUI = True
 except ImportError:
     _PYAUTOGUI = False

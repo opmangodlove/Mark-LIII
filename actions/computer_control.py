@@ -278,18 +278,23 @@ def _scroll(direction: str = "down", amount: int = 3) -> str:
     return f"Scrolled {direction} ×{amount}"
 
 
-def _move(x: int, y: int, duration: float = 0.3) -> str:
+def _move(x: int, y: int, duration: float = 0.0) -> str:
     _require_pyautogui()
     rx, ry = _rescale_xy(x, y)
+    # duration=0 (was 0.3): the animated tween added a guaranteed 300 ms to
+    # every cursor reposition with zero benefit — the model only needs the
+    # pointer AT the target before the next click, not a travel film.
     pyautogui.moveTo(rx, ry, duration=duration)
     return f"Mouse → ({rx}, {ry})"
 
 
-def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.5) -> str:
+def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.15) -> str:
     _require_pyautogui()
     rx1, ry1 = _rescale_xy(x1, y1)
     rx2, ry2 = _rescale_xy(x2, y2)
-    pyautogui.moveTo(rx1, ry1, duration=0.2)
+    # Was 0.2 s positioning + 0.5 s drag = ≥700 ms of tweening per drag;
+    # 0.05 + 0.15 keeps it reliable for real drag targets but 3× faster.
+    pyautogui.moveTo(rx1, ry1, duration=0.05)
     pyautogui.dragTo(rx2, ry2, duration=duration, button="left")
     return f"Dragged ({rx1},{ry1}) → ({rx2},{ry2})"
 

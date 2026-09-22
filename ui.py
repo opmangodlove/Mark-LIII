@@ -2673,7 +2673,7 @@ class RemoteKeyOverlay(QWidget):
     _OW, _OH = 400, 465
 
     def __init__(self, url: str, key: str, auto_login_url: str = "",
-                 manual_url: str = "", expiry_secs: int = 600, parent=None):
+                 manual_url: str = "", expiry_secs: int | None = None, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"""
@@ -2683,7 +2683,8 @@ class RemoteKeyOverlay(QWidget):
                 border-radius: 14px;
             }}
         """)
-        self._expiry          = time.time() + expiry_secs
+        # The pairing key is permanent — no countdown, no auto-close.
+        self._expiry          = (time.time() + expiry_secs) if expiry_secs else None
         self._on_new_key      = None
         self._auto_login_url  = auto_login_url
         self._manual_url      = manual_url or url
@@ -2833,6 +2834,9 @@ class RemoteKeyOverlay(QWidget):
             )
 
     def _tick(self):
+        if self._expiry is None:
+            self._timer_lbl.setText("Permanent key — rescan anytime")
+            return
         remaining = max(0, int(self._expiry - time.time()))
         m, s = divmod(remaining, 60)
         self._timer_lbl.setText(f"Key expires in  {m:02d}:{s:02d}")
@@ -2872,7 +2876,7 @@ class RemoteKeyOverlay(QWidget):
                 self._key_lbl.setText(key)
                 self._auto_login_url = auto
                 self._update_qr(auto or url)
-                self._expiry = time.time() + 600
+                self._expiry = None
                 self._key_lbl.setStyleSheet(f"""
                     color: {C.ACC};
                     background: {C.PANEL2};
@@ -4190,7 +4194,7 @@ class MainWindow(QMainWindow):
         cw  = self.centralWidget()
         ow, oh = RemoteKeyOverlay._OW, RemoteKeyOverlay._OH
         ov  = RemoteKeyOverlay(url, key, auto_login_url=auto, manual_url=manual,
-                               expiry_secs=600, parent=cw)
+                               parent=cw)
         ov.set_new_key_callback(self.on_remote_clicked)
         ov.setGeometry(
             (cw.width()  - ow) // 2,

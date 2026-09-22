@@ -139,9 +139,9 @@
     <p id="reconnecting">Reconnecting…</p>
     <p class="hint">Press <strong style="color:var(--text)">Remote Control</strong> in the JARVIS desktop app to get a QR code or session key.</p>
     <div class="key-wrap">
-      <input class="key-input" id="key" type="text" maxlength="6"
+      <input class="key-input" id="key" type="text" maxlength="8"
              autocomplete="off" autocorrect="off" spellcheck="false"
-             placeholder="· · · · · ·">
+             placeholder="· · · · · · · ·">
     </div>
     <div class="err" id="err"></div>
     <button class="btn" onclick="doLogin()">CONNECT</button>
@@ -182,13 +182,13 @@
 
     inp.addEventListener('input', () => {
       inp.value = inp.value.toUpperCase().replace(/[^A-Z2-9]/g, '');
-      if (inp.value.length === 6) doLogin();
+      if (inp.value.length === 8) doLogin();
     });
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 
     async function doLogin() {
       const key = inp.value.trim();
-      if (key.length < 6) { shake(); return; }
+      if (key.length < 8) { shake(); return; }
       let data;
       try {
         const r = await fetch('/login', {

@@ -17,6 +17,7 @@ Run:  pythonw voice_launch.py
 Stop:  tray-style — it has no UI; kill it from Task Manager (voice_launch.py)
 """
 
+import atexit
 import difflib
 import json
 import os
@@ -38,6 +39,7 @@ MAIN_PY = APP_DIR / "main.py"
 MODEL_DIR = BASE_DIR / "vosk-model-small-en-us-0.15"
 STATE_FILE = BASE_DIR / "launcher_state.json"
 LOG_FILE  = BASE_DIR / "launcher_log.txt"
+LOCK_FILE = BASE_DIR / "launcher.lock"
 
 # Patch: crash auto-revival. A clean exit ("Jarvis goodnight", window closed,
 # shutdown tool) leaves this flag behind; a crash leaves nothing. When the
@@ -63,6 +65,14 @@ LAUNCH_PHRASES = [
     "hey jarvis",
     "jarvis come online",
 ]
+
+# Digital-silence watchdog backoff — persists across listen() restarts. With
+# a persistently dead device the watchdog re-fired every ~90 s, and every
+# re-probe OPENED the Bluetooth mic: each open forced the headset into
+# phone-call audio (HFP), degrading all system sound until it closed — the
+# measured "quality drops and recovers at intervals". Backoff spreads the
+# retries out instead of thrashing the headset.
+_silence_state = {"n": 0, "until": 0.0}
 
 # Phrases that QUIT JARVIS (only acted on when he is running).
 QUIT_PHRASES = [
@@ -103,7 +113,27 @@ _PS_PIDS = (
 
 
 def jarvis_pids() -> list[str]:
-    """PIDs of running JARVIS (main.py) processes; empty if none."""
+    """PIDs of running JARVIS (main.py) processes; empty if none.
+
+    psutil first: one in-process process-table walk (~10 ms). The PowerShell
+    round-trip previously took 1-4 s per phrase — it delayed every reaction
+    and stalled audio handling while a phrase was being processed. The
+    PowerShell path remains as a fallback for installs without psutil."""
+    try:
+        import psutil
+        out = []
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if (p.info["name"] or "").lower() not in ("pythonw.exe", "python.exe"):
+                    continue
+                cl = " ".join(p.info["cmdline"] or [])
+                if "main.py" in cl and "voice_launch" not in cl:
+                    out.append(str(p.info["pid"]))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        pass
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_PIDS],
@@ -147,6 +177,20 @@ def pick_input_device():
         return None
 
 
+# Words that decide WHICH phrase was said. 'good' is shared by three
+# phrases ('good morning/evening/night'), so it cannot discriminate — but
+# morning/evening/night/wake/up/... each point at exactly one phrase. The
+# measured bug: the all-but-one rule read 'jarvis good MORNING' as the quit
+# phrase 'jarvis good NIGHT' (one wrong word is allowed!) and SHUT DOWN a
+# running JARVIS when the user greeted it. Discriminating words must now
+# ALL match; only truly non-discriminating words can be misheard.
+_PHRASE_DISCRIMINATORS = {
+    "morning", "evening", "night",
+    "wake", "up", "come", "online",
+    "sleep", "now", "shut", "down",
+}
+
+
 def _fuzzy_hit(tokens: list[str], phrase_tokens: list[str]) -> bool:
     """Windowed token match that forgives one misheard word in three-plus.
 
@@ -158,7 +202,10 @@ def _fuzzy_hit(tokens: list[str], phrase_tokens: list[str]) -> bool:
     The phrase's FIRST word ('jarvis' / 'hey') must also match approximately
     somewhere in the window — measured live: without an anchor, 'the order to
     MAKE UP your a yeah' matched launch phrase 'jarvis WAKE UP' (make≈wake,
-    up=up) and spuriously triggered a launch."""
+    up=up) and spuriously triggered a launch.
+
+    Every DISCRIMINATING word of the phrase must match — see
+    _PHRASE_DISCRIMINATORS for the wrongful-quit this prevents."""
     n = len(phrase_tokens)
     if len(tokens) < n:
         return False
@@ -171,8 +218,15 @@ def _fuzzy_hit(tokens: list[str], phrase_tokens: list[str]) -> bool:
             for a in window
         ):
             continue
+        pairs = list(zip(window, phrase_tokens))
+        if any(
+            b in _PHRASE_DISCRIMINATORS
+            and not (a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.75)
+            for a, b in pairs
+        ):
+            continue
         hits = sum(
-            1 for a, b in zip(window, phrase_tokens)
+            1 for a, b in pairs
             if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
         )
         if hits >= needed:
@@ -219,12 +273,22 @@ def quit_jarvis(pids: list[str]) -> None:
     # quit as a crash and revive him mid-goodnight.
     _mark_clean_exit()
     log(f"quit phrase heard — closing JARVIS (pids: {', '.join(pids)})")
+    try:
+        import psutil
+    except Exception:
+        psutil = None
     for pid in pids:
-        subprocess.run(
-            ["taskkill", "/PID", pid, "/F"],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        try:
+            if psutil is not None:
+                psutil.Process(int(pid)).kill()   # ~0 ms, unlike taskkill's spawn
+            else:
+                subprocess.run(
+                    ["taskkill", "/PID", pid, "/F"],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+        except Exception as e:
+            log(f"kill {pid} failed: {e}")
 
 
 def write_state(trigger: str) -> None:
@@ -380,7 +444,7 @@ def listen() -> None:
     # The callback now only recognises and enqueues; the main loop acts.
     actions_q: queue.Queue = queue.Queue()
 
-    mic_state = {"last_data": time.time(), "max_level": 0}
+    mic_state = {"last_data": time.time(), "max_level": 0, "seen_any": False}
 
     def on_audio(indata, frames, time_info, status):
         # Patch: any exception inside a PortAudio callback silently kills the
@@ -389,6 +453,7 @@ def listen() -> None:
         # in here is allowed to raise.
         try:
             mic_state["last_data"] = time.time()
+            mic_state["seen_any"] = True
             lvl = int(abs(indata).max()) if len(indata) else 0
             if lvl > mic_state["max_level"]:
                 mic_state["max_level"] = lvl
@@ -410,6 +475,9 @@ def listen() -> None:
     log("listening — say 'Jarvis good morning' to launch JARVIS")
     last_launch = 0.0
     last_quit = 0.0
+    # Whether the launcher is aware of a running JARVIS is checked ONCE via
+    # the fast psutil path when a phrase is heard; a decision cached longer
+    # than this gets re-verified before acting.
     dev = pick_input_device()
     # Record the mic this process actually opened, so the JARVIS app (and
     # vice versa) can adopt the PROVEN device instead of mis-probing it
@@ -449,6 +517,36 @@ def listen() -> None:
                 log(f"mic silent {silent_for:.0f}s (max level seen: "
                     f"{mic_state['max_level']}) — restarting audio stream")
                 raise RuntimeError("mic watchdog: no audio for 30s")
+            # Patch: DIGITAL-SILENCE watchdog — frames keep flowing but their
+            # amplitude is 1 (Windows re-applied the endpoint mute; the AMD
+            # mic array does exactly this). Frames-are-flowing checks above
+            # never fire, the launcher looks healthy, and it sits deaf for
+            # days — measured live 14:35→evening. Cure: re-audit devices and
+            # hot-swap onto a mic that provably hears. The re-probe's sandboxed
+            # child also clears any re-applied endpoint mute (healing must run
+            # in the child — COM in this long-lived process segfaults; see
+            # core/mic_health.py SANDBOX notes). Raising reuses the restart
+            # loop below.
+            if (time.time() - last_beat) > 20 and mic_state["seen_any"] \
+                    and mic_state["max_level"] <= 2:
+                now_s = time.time()
+                if now_s < _silence_state["until"]:
+                    continue
+                _silence_state["n"] += 1
+                _wait_s = min(60 * (2 ** (_silence_state["n"] - 1)), 600)
+                _silence_state["until"] = now_s + _wait_s
+                log("mic delivers DIGITAL SILENCE (peak <=2 with frames "
+                    f"flowing) — re-auditing devices (attempt "
+                    f"{_silence_state['n']}, next in {_wait_s:.0f}s)")
+                new_dev = pick_input_device()
+                if new_dev is not None and new_dev != dev:
+                    try:
+                        _nname = sd.query_devices()[new_dev].get("name", "") or f"#{new_dev}"
+                    except Exception:
+                        _nname = f"#{new_dev}"
+                    log(f"switching deaf mic #{dev} -> #{new_dev} {_nname!r}")
+                    dev = new_dev
+                raise RuntimeError("mic watchdog: digital silence")
             # Patch: device-switch watcher (the user's request): bluetooth
             # headset connects → its mic becomes the ear; it powers off →
             # fall back to the laptop's built-in mic. The signature only
@@ -483,6 +581,11 @@ def listen() -> None:
             if time.time() - last_beat > 60:
                 last_beat = time.time()
                 log(f"alive; mic max level last minute: {mic_state['max_level']}")
+                if mic_state["max_level"] > 20:
+                    # Real audio flowed — the deaf-mic episode is over; the
+                    # silence watchdog may act immediately again.
+                    _silence_state["n"] = 0
+                    _silence_state["until"] = 0.0
                 mic_state["max_level"] = 0
             try:
                 kind, text = actions_q.get(timeout=1.0)
@@ -503,6 +606,8 @@ def listen() -> None:
                 continue
 
             if (now - last_launch) > LAUNCH_COOLDOWN_S:
+                # Only touch the process table (psutil, ~10 ms) when a launch
+                # phrase is actually due; never in the audio callback.
                 last_launch = now
                 write_state(f"launch via: {text}")
                 if not jarvis_pids():
@@ -511,37 +616,62 @@ def listen() -> None:
                     log(f"already running — ignored ({text})")
 
 
+def _cleanup_lock() -> None:
+    """Remove our lock file on exit — and only OURS. If a replacement
+    launcher already claimed the path (upgrade/restart race), deleting it
+    would open the gate to a third instance, so the content is checked
+    first. Best-effort: atexit must never raise."""
+    try:
+        if int(LOCK_FILE.read_text().strip() or 0) == os.getpid():
+            LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     # Single-instance guard: Windows auto-start plus a manual launch (or a
     # boot race between two startup entries) can silently run two launchers.
     # Then ONE wake word spawns TWO JARVISes that fight over the dashboard
     # port. The lock file holds the first instance's PID; a late second
     # instance exits quietly. Stale lock (dead PID) is claimed automatically.
-    _lock = BASE_DIR / "launcher.lock"
+    _lock = LOCK_FILE
     try:
         _existing = int(_lock.read_text().strip() or 0)
     except Exception:
         _existing = 0
     if _existing:
-        _alive = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {_existing}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if str(_existing) in _alive.stdout:
+        try:
+            import psutil
+            _alive = psutil.pid_exists(_existing)
+        except Exception:
+            _alive = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {_existing}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            _alive = str(_existing) in _alive.stdout
+        if _alive:
             print(f"[voice-launch] another launcher already runs (pid {_existing}) — exiting")
             sys.exit(0)
-    _lock.write_text(str(os.getpid()))
-    # Race verification: two instances started in the same second both see
-    # no lock, both write. The LAST writer wins — everyone else re-reads,
-    # sees a foreign PID, and exits. Exactly one survivor, every time.
-    time.sleep(0.7)
+        # Stale lock from a dead launcher — remove it so O_EXCL below can
+        # claim a fresh one. A same-second racing starter that also unlinks
+        # is harmless: the O_EXCL create still lets exactly one of us win.
+        try:
+            _lock.unlink(missing_ok=True)
+        except Exception:
+            pass
+    # Windows-only mandatory lock: exclusive CREATE_NEW always succeeds for
+    # exactly one of N simultaneous starters; the losers exit. This closes
+    # the measured race where two same-second starters BOTH passed the old
+    # write-then-recheck dance (two launchers → two JARVISes → port fights).
     try:
-        if int(_lock.read_text().strip() or 0) != os.getpid():
-            print("[voice-launch] lost the startup race — another launcher owns the lock — exiting")
-            sys.exit(0)
-    except Exception:
-        pass
+        _lock_fd = os.open(str(_lock), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+    except FileExistsError:
+        print("[voice-launch] another launcher owns the lock — exiting")
+        sys.exit(0)
+    with os.fdopen(_lock_fd, "w") as _lf:
+        _lf.write(str(os.getpid()))
+    atexit.register(_cleanup_lock)
 
     # A flag surviving from a previous launcher run says nothing about the
     # JARVIS run that follows — crashes since then must be revivable.

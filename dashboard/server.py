@@ -423,7 +423,24 @@ class DashboardServer:
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
+        self._loop: asyncio.AbstractEventLoop | None = None   # captured in serve()
         self.app                          = self._build_app()
+
+    # ── task board push (used by actions/manage_tasks) ───────────────────
+
+    def push_task_change(self, board: dict) -> None:
+        """Thread-safe push of the task board to every connected client.
+
+        Tool handlers run in executor threads, off the uvicorn loop —
+        run_coroutine_threadsafe hops the broadcast onto the loop. A no-op
+        when the server never started (dashboard optional by design)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.broadcast(board), loop)
+        except Exception:
+            pass
 
     # ── one-time key management ───────────────────────────────────────────
 
@@ -748,6 +765,91 @@ class DashboardServer:
                 "activity": activity,
             })
 
+        # ── Command center: tasks / memory / system ─────────────────────────
+
+        @app.get("/api/tasks")
+        async def tasks_get(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from actions.manage_tasks import board_data
+                return JSONResponse({"ok": True, "tasks": board_data().get("tasks", [])})
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.post("/api/tasks")
+        async def tasks_post(req: Request):
+            """Same dispatch voice uses — add/list/move/update/delete.
+            Mutations broadcast task_changed over the WebSocket automatically."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            try:
+                from actions.manage_tasks import dispatch, board_data
+                ok, msg = dispatch(body or {})
+                return JSONResponse({
+                    "ok": ok, "message": msg,
+                    "tasks": board_data().get("tasks", []),
+                })
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/memory")
+        async def memory_get(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from memory.memory_manager import all_entries_for_ui
+                return JSONResponse({"ok": True, "entries": all_entries_for_ui()})
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.post("/api/memory")
+        async def memory_post(req: Request):
+            """remember {category,key,value} | forget {category,key} — the same
+            store the save_memory tool and the HUD memory panel use."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            action = str((body or {}).get("action", "")).strip().lower()
+            try:
+                from memory.memory_manager import remember, forget, all_entries_for_ui
+                if action == "remember":
+                    key   = str(body.get("key", "")).strip()
+                    value = str(body.get("value", "")).strip()
+                    if not key or not value:
+                        return JSONResponse({"ok": False, "error": "key and value required"},
+                                            status_code=400)
+                    remember(key, value, str(body.get("category", "notes")))
+                elif action == "forget":
+                    key = str(body.get("key", "")).strip()
+                    if not key:
+                        return JSONResponse({"ok": False, "error": "key required"},
+                                            status_code=400)
+                    forget(key, str(body.get("category", "notes")))
+                else:
+                    return JSONResponse({"ok": False, "error": "unknown action"},
+                                        status_code=400)
+                return JSONResponse({"ok": True, "entries": all_entries_for_ui()})
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/system")
+        async def system_get(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from actions.system_monitor import get_system_status
+                return JSONResponse({"ok": True, **get_system_status()})
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")
@@ -877,6 +979,13 @@ class DashboardServer:
                     await websocket.send_json(entry)
                 except Exception:
                     break
+            # Command-center clients get the current board on connect so a
+            # freshly opened Tasks tab never waits for the next mutation.
+            try:
+                from actions.manage_tasks import board_data
+                await websocket.send_json(board_data())
+            except Exception:
+                pass
             try:
                 while True:
                     data = await websocket.receive_json()
@@ -928,6 +1037,10 @@ class DashboardServer:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
             return
+
+        # Capture the loop push_task_change() hops broadcasts onto. Tool
+        # handlers run in executor threads and have no loop of their own.
+        self._loop = asyncio.get_running_loop()
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
         # no waiting for UAC dialogs or subprocess timeouts.

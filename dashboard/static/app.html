@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>JARVIS Dashboard</title>
+  <title>JARVIS Command Center</title>
   <script src="/static/crypto.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -17,6 +17,8 @@
       --muted:   #5e6a7e;
       --green:   #22c55e;
       --gdim:    rgba(34,197,94,0.14);
+      --red:     #f87171;
+      --amber:   #f59e0b;
     }
     html, body {
       height: 100%; background: var(--bg); color: var(--text);
@@ -27,7 +29,7 @@
     /* ── HEADER ── */
     header {
       flex-shrink: 0; display: flex; align-items: center; gap: 10px;
-      padding: 12px 16px; border-bottom: 1px solid var(--border);
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
       background: rgba(7,9,15,0.95);
     }
     .logo { font-size: 15px; font-weight: 700; letter-spacing: 6px; }
@@ -43,18 +45,34 @@
     .pill.on .dot { background: var(--green); animation: blink 2s infinite; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
     .spacer { flex: 1; }
-    .enc-badge {
-      font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 3px 8px;
-      border-radius: 4px; display: none;
-    }
+    .enc-badge { font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 3px 8px; border-radius: 4px; display: none; }
     .enc-badge.on  { display: block; background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25); color: var(--green); }
     .enc-badge.off { display: block; background: rgba(255,100,100,0.08); border: 1px solid rgba(255,100,100,0.2); color: #f87171; }
     .url { font-size: 10px; font-family: monospace; color: var(--muted); padding: 4px 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
 
-    /* ── FEED ── */
-    main { flex: 1; overflow-y: auto; padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
-    main::-webkit-scrollbar { width: 3px; }
-    main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    /* ── TABS ── */
+    nav {
+      flex-shrink: 0; display: flex; gap: 2px; padding: 6px 10px 0;
+      border-bottom: 1px solid var(--border); background: rgba(7,9,15,0.92);
+      overflow-x: auto; scrollbar-width: none;
+    }
+    nav::-webkit-scrollbar { display: none; }
+    .tab {
+      padding: 9px 16px 8px; font-size: 12px; font-weight: 700; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--muted); cursor: pointer;
+      border: none; background: none; border-bottom: 2px solid transparent;
+      white-space: nowrap; transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .view { flex: 1; display: none; flex-direction: column; min-height: 0; }
+    .view.active { display: flex; }
+
+    /* ── CHAT ── */
+    #view-chat main { flex: 1; overflow-y: auto; padding: 14px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
+    #view-chat main::-webkit-scrollbar { width: 3px; }
+    #view-chat main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.55; animation: pop 0.18s ease; }
     @keyframes pop { from { opacity:0; transform:translateY(4px); } }
     .msg-j   { align-self:flex-start; background:var(--adim);   border:1px solid rgba(99,102,241,0.18); border-bottom-left-radius:4px; }
@@ -64,14 +82,108 @@
     .msg-j .lbl { color:var(--accent); }
     .msg-u .lbl { color:var(--muted); text-align:right; }
 
+    #hist-panel { display:none; max-height:38vh; overflow:auto; background:rgba(255,255,255,0.04);
+      border:1px solid rgba(255,255,255,0.08); border-radius:10px; margin:6px 12px; padding:10px;
+      font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; color:#aeb8c9; }
+
+    .chat-footer { flex-shrink:0; padding:10px 14px; border-top:1px solid var(--border);
+      background:rgba(7,9,15,0.95); display:flex; gap:8px; align-items:center; }
+    #inp { flex:1; padding:11px 14px; background:var(--surface); border:1.5px solid var(--border);
+      border-radius:12px; color:var(--text); font-size:14px; outline:none; transition:border-color 0.15s; }
+    #inp:focus { border-color: var(--accent); }
+    #inp::placeholder { color: var(--muted); }
+    .btn { padding:11px 15px; border:none; border-radius:12px; font-size:11px; font-weight:700;
+      letter-spacing:1.5px; cursor:pointer; transition:opacity 0.15s,transform 0.1s; color:var(--text); background:var(--surface); }
+    .btn:active { transform: scale(0.96); }
+    .btn:hover  { opacity: 0.82; }
+    .btn-send { background: var(--accent); color: #fff; }
+    .btn-wake { display:none; }
+    .btn-wake.show { display:block; color:var(--green); border-color:rgba(34,197,94,0.35); }
+    .btn-attach { background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px; cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s; display: flex; align-items: center;
+      justify-content: center; flex-shrink: 0; }
+    .btn-attach:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
+    #mic-btn { background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px; cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s, background 0.2s, border-color 0.2s;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    #mic-btn:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
+    #mic-btn.recording { background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.45); color: #ef4444;
+      animation: mic-pulse 1s ease-in-out infinite; }
+    @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
+
+    /* ── TASKS ── */
+    #view-tasks { padding: 12px; overflow-y: auto; }
+    .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    @media (min-width: 760px) { .board { grid-template-columns: repeat(4, 1fr); } }
+    .col { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 8px; display: flex; flex-direction: column; gap: 8px; min-height: 130px; }
+    .col.drag-over { border-color: var(--accent); background: var(--adim); }
+    .col-head { display:flex; align-items:center; justify-content:space-between; padding: 2px 4px; }
+    .col-title { font-size:10px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:var(--muted); }
+    .col-count { font-size:10px; color:var(--muted); background:var(--border); border-radius:99px; padding:1px 8px; }
+    .card { background: rgba(7,9,15,0.6); border: 1px solid var(--border); border-radius: 10px;
+      padding: 9px 10px; cursor: grab; animation: pop 0.15s ease; }
+    .card.dragging { opacity: 0.45; }
+    .card-title { font-size: 13px; line-height: 1.4; margin-bottom: 6px; word-break: break-word; }
+    .card.done .card-title { text-decoration: line-through; opacity: 0.55; }
+    .card-meta { display:flex; gap:5px; flex-wrap:wrap; align-items:center; }
+    .tag { font-size:9px; padding:2px 7px; border-radius:99px; border:1px solid var(--border); color:var(--muted); letter-spacing:0.5px; }
+    .pr-low      { color:#94a3b8; border-color:rgba(148,163,184,0.35); }
+    .pr-medium   { color:#38bdf8; border-color:rgba(56,189,248,0.35); }
+    .pr-high     { color:var(--amber); border-color:rgba(245,158,11,0.4); }
+    .pr-critical { color:var(--red); border-color:rgba(248,113,113,0.45); }
+    .card-del { margin-left:auto; background:none; border:none; color:var(--muted); cursor:pointer; font-size:12px; padding:0 2px; }
+    .card-del:hover { color: var(--red); }
+    .tasks-toolbar { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
+    #task-inp { flex:1; padding:10px 13px; background:var(--surface); border:1.5px solid var(--border);
+      border-radius:11px; color:var(--text); font-size:13px; outline:none; }
+    #task-inp:focus { border-color: var(--accent); }
+    #task-status { font-size: 11px; color: var(--muted); padding: 6px 2px; min-height: 18px; }
+
+    /* ── MEMORY ── */
+    #view-memory { padding: 12px; overflow-y: auto; }
+    .mem-toolbar { display:flex; gap:8px; margin-bottom:10px; }
+    #mem-search { flex:1; padding:10px 13px; background:var(--surface); border:1.5px solid var(--border);
+      border-radius:11px; color:var(--text); font-size:13px; outline:none; }
+    #mem-search:focus { border-color: var(--accent); }
+    .mem-list { display:flex; flex-direction:column; gap:7px; }
+    .mem-item { display:flex; gap:10px; align-items:baseline; background:var(--surface);
+      border:1px solid var(--border); border-radius:10px; padding:9px 12px; }
+    .mem-cat { flex-shrink:0; font-size:9px; font-weight:700; letter-spacing:1.2px; text-transform:uppercase;
+      color:var(--accent); opacity:0.85; width:92px; }
+    .mem-key { flex-shrink:0; font-size:12px; font-weight:600; color:var(--text); width:120px;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .mem-val { flex:1; font-size:12.5px; color:#aeb8c9; line-height:1.45; word-break:break-word; }
+    .mem-del { flex-shrink:0; background:none; border:none; color:var(--muted); cursor:pointer; font-size:13px; }
+    .mem-del:hover { color: var(--red); }
+    .mem-empty { color:var(--muted); font-size:12.5px; text-align:center; padding:24px 0; }
+
+    /* ── SYSTEM ── */
+    #view-system { padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+    .sys-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }
+    .stat { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
+    .stat-lbl { font-size:9px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:var(--muted); margin-bottom:6px; }
+    .stat-val { font-size:22px; font-weight:700; color:var(--text); }
+    .stat-val small { font-size:11px; color:var(--muted); font-weight:600; }
+    .stat-bar { height:4px; background:var(--border); border-radius:2px; margin-top:9px; overflow:hidden; }
+    .stat-bar i { display:block; height:100%; width:0%; background:var(--accent); border-radius:2px; transition:width 0.5s; }
+    .stat-bar i.hot { background: var(--red); }
+    .sys-note { font-size:11px; color:var(--muted); text-align:center; }
+
+    /* ── TOAST ── */
+    #toast { position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
+      background:rgba(34,197,94,0.16); border:1px solid rgba(34,197,94,0.4);
+      color:var(--green); font-size:12px; font-weight:700; letter-spacing:1px;
+      padding:7px 18px; border-radius:99px; opacity:0; transition:opacity 0.22s,transform 0.22s;
+      pointer-events:none; white-space:nowrap; z-index:50; }
+    #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
     /* ── FILE CARD ── */
-    .msg-file {
-      align-self: flex-end;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 14px; border-bottom-right-radius: 4px;
-      padding: 11px 14px; display: flex; align-items: center; gap: 12px;
-      max-width: 82%; animation: pop 0.18s ease;
-    }
+    .msg-file { align-self: flex-end; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; border-bottom-right-radius: 4px; padding: 11px 14px; display: flex;
+      align-items: center; gap: 12px; max-width: 82%; animation: pop 0.18s ease; }
     .fc-icon { font-size: 26px; flex-shrink: 0; }
     .fc-meta { flex: 1; min-width: 0; }
     .fc-lbl  { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; color:var(--muted); margin-bottom:4px; }
@@ -83,54 +195,6 @@
     .fc-status.done { color: var(--green); }
     .fc-status.err  { color: #f87171; }
     .fc-dl { display:block; margin-top:6px; font-size:11px; color:var(--accent); text-decoration:none; font-weight:600; }
-    .fc-dl:hover { opacity: 0.8; }
-
-    /* ── FOOTER ── */
-    footer { flex-shrink:0; padding:10px 14px; border-top:1px solid var(--border); background:rgba(7,9,15,0.95); display:flex; gap:8px; align-items:center; }
-    #inp { flex:1; padding:11px 14px; background:var(--surface); border:1.5px solid var(--border); border-radius:12px; color:var(--text); font-size:14px; outline:none; transition:border-color 0.15s; }
-    #inp:focus { border-color: var(--accent); }
-    #inp::placeholder { color: var(--muted); }
-    .btn { padding:11px 15px; border:none; border-radius:12px; font-size:11px; font-weight:700; letter-spacing:1.5px; cursor:pointer; transition:opacity 0.15s,transform 0.1s; }
-    .btn:active { transform: scale(0.96); }
-    .btn:hover  { opacity: 0.82; }
-    .btn-send { background: var(--accent); color: #fff; }
-    .btn-wake { background:var(--surface); border:1px solid var(--border); color:var(--muted); display:none; }
-    .btn-wake.show { display:block; color:var(--green); border-color:rgba(34,197,94,0.35); }
-    .btn-attach {
-      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s; display: flex;
-      align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    .btn-attach:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
-    .btn-attach:active { transform: scale(0.96); }
-
-    /* ── MIC BUTTON ── */
-    #mic-btn {
-      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-      padding: 11px 13px; font-size: 16px; line-height: 1; border-radius: 12px;
-      cursor: pointer; transition: opacity 0.15s, transform 0.1s, background 0.2s, border-color 0.2s;
-      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    }
-    #mic-btn:hover  { opacity: 0.82; border-color: var(--accent); color: var(--accent); }
-    #mic-btn:active { transform: scale(0.96); }
-    #mic-btn.recording {
-      background: rgba(239,68,68,0.15); border-color: rgba(239,68,68,0.45); color: #ef4444;
-      animation: mic-pulse 1s ease-in-out infinite;
-    }
-    #mic-btn.unsupported { opacity: 0.3; cursor: not-allowed; }
-    @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
-
-    /* ── TOAST ── */
-    #toast {
-      position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
-      background:rgba(34,197,94,0.16); border:1px solid rgba(34,197,94,0.4);
-      color:var(--green); font-size:12px; font-weight:700; letter-spacing:1px;
-      padding:7px 18px; border-radius:99px;
-      opacity:0; transition:opacity 0.22s,transform 0.22s;
-      pointer-events:none; white-space:nowrap;
-    }
-    #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   </style>
 </head>
 <body>
@@ -142,20 +206,53 @@
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
-  <div id="hist-panel" style="display:none;max-height:45vh;overflow:auto;
-       background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
-       border-radius:10px;margin:6px 10px;padding:10px;font-size:12px;line-height:1.5;
-       white-space:pre-wrap;word-break:break-word;color:#aeb8c9"></div>
-  <main id="feed"></main>
-  <footer>
-    <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
-    <label class="btn-attach" for="file-inp" title="Send file">📎</label>
-    <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
-    <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
-    <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
-    <button class="btn btn-send" onclick="doSend()">SEND</button>
-    <button class="btn" onclick="toggleHistory()" title="What JARVIS did in the last 24 hours (fetched once, on demand — never streamed)">📜</button>
-  </footer>
+
+  <nav>
+    <button class="tab active" data-view="chat">Chat</button>
+    <button class="tab" data-view="tasks">Tasks</button>
+    <button class="tab" data-view="memory">Memory</button>
+    <button class="tab" data-view="system">System</button>
+  </nav>
+
+  <!-- ═══ CHAT ═══ -->
+  <section class="view active" id="view-chat">
+    <div id="hist-panel"></div>
+    <main id="feed"></main>
+    <div class="chat-footer">
+      <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
+      <label class="btn-attach" for="file-inp" title="Send file">📎</label>
+      <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
+      <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
+      <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
+      <button class="btn btn-send" onclick="doSend()">SEND</button>
+      <button class="btn" onclick="toggleHistory()" title="What JARVIS did in the last 24 hours (on demand)">📜</button>
+    </div>
+  </section>
+
+  <!-- ═══ TASKS ═══ -->
+  <section class="view" id="view-tasks">
+    <div class="tasks-toolbar">
+      <input id="task-inp" placeholder="New task — Enter to add (voice works too: “Jarvis, add a task …”)" autocomplete="off">
+      <button class="btn" onclick="addTaskFromInput()">＋ ADD</button>
+    </div>
+    <div id="task-status"></div>
+    <div class="board" id="board"></div>
+  </section>
+
+  <!-- ═══ MEMORY ═══ -->
+  <section class="view" id="view-memory">
+    <div class="mem-toolbar">
+      <input id="mem-search" placeholder="Filter what JARVIS knows…" autocomplete="off">
+      <button class="btn" onclick="loadMemory()">↻</button>
+    </div>
+    <div class="mem-list" id="mem-list"><div class="mem-empty">Loading memory…</div></div>
+  </section>
+
+  <!-- ═══ SYSTEM ═══ -->
+  <section class="view" id="view-system">
+    <div class="sys-grid" id="sys-grid"></div>
+    <div class="sys-note" id="sys-note">Sampling…</div>
+  </section>
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
@@ -170,6 +267,105 @@
     function _authFetch(url, opts = {}) {
       opts.headers = Object.assign({}, opts.headers, _authHeader());
       return fetch(url, opts);
+    }
+
+    // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
+    const _AES_SALT = 'JARVIS-DASHBOARD-v1';
+    let _aesKey = null;
+
+    function _initCrypto(key) {
+      if (typeof CryptoJS === 'undefined') return false;
+      _aesKey = CryptoJS.SHA256(key + _AES_SALT);
+      return true;
+    }
+
+    function _encrypt(plaintext) {
+      if (!_aesKey || typeof CryptoJS === 'undefined') return null;
+      try {
+        const iv  = CryptoJS.lib.WordArray.random(16);
+        const enc = CryptoJS.AES.encrypt(
+          CryptoJS.enc.Utf8.parse(plaintext), _aesKey,
+          { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+        const ivHex = iv.toString(CryptoJS.enc.Hex);
+        const ctHex = enc.ciphertext.toString(CryptoJS.enc.Hex);
+        const hex   = ivHex + ctHex;
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < bytes.length; i++)
+          bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+        return btoa(String.fromCharCode(...bytes));
+      } catch { return null; }
+    }
+
+    const _encReady = _sessionKey ? _initCrypto(_sessionKey) : false;
+    const encBadge  = document.getElementById('enc');
+    if (_encReady) { encBadge.className = 'enc-badge on'; }
+    else           { encBadge.className = 'enc-badge off'; encBadge.textContent = 'NO ENC'; }
+
+    // ── Tabs ──────────────────────────────────────────────────────────────────
+    document.querySelectorAll('.tab').forEach(t => {
+      t.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+        document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+        t.classList.add('active');
+        document.getElementById('view-' + t.dataset.view).classList.add('active');
+        if (t.dataset.view === 'memory')  loadMemory();
+        if (t.dataset.view === 'system')  startSystem();
+      });
+    });
+
+    // ── WebSocket ─────────────────────────────────────────────────────────────
+    const feed  = document.getElementById('feed');
+    const pill  = document.getElementById('pill');
+    const stTxt = document.getElementById('st');
+    const wake  = document.getElementById('wake');
+
+    const _wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const _wsUrl   = `${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`;
+    const ws       = new WebSocket(_wsUrl);
+
+    ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
+    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
+    ws.onerror   = () => sys('Connection error.');
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.type === 'log')           append(m.speaker, m.text);
+      if (m.type === 'status')        setStatus(m.state);
+      if (m.type === 'wake')          sys('Wake word detected — connecting…');
+      if (m.type === 'sys')           sys(m.text);
+      if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'task_changed')  renderBoard(m.tasks || []);
+    };
+
+    function setStatus(s) {
+      if (s === 'active') {
+        pill.className = 'pill on'; stTxt.textContent = 'Active'; wake.classList.remove('show');
+      } else {
+        pill.className = 'pill'; stTxt.textContent = 'Sleeping'; wake.classList.add('show');
+      }
+    }
+
+    function append(speaker, text) {
+      const d = document.createElement('div');
+      if (speaker === 'jarvis') {
+        d.className = 'msg msg-j';
+        d.innerHTML = `<div class="lbl">Jarvis</div>${esc(text)}`;
+      } else {
+        d.className = 'msg msg-u';
+        d.innerHTML = `<div class="lbl">You</div>${esc(text)}`;
+      }
+      feed.appendChild(d);
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    function sys(text) {
+      const d = document.createElement('div');
+      d.className = 'msg msg-sys'; d.textContent = text;
+      feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
+    }
+
+    function esc(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
     // ── 24h history — fetched ONLY when the user taps the 📜 button ──────────
@@ -206,90 +402,215 @@
       }
     }
 
-    // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
-    const _AES_SALT = 'JARVIS-DASHBOARD-v1';
-    let _aesKey = null;
-
-    function _initCrypto(key) {
-      if (typeof CryptoJS === 'undefined') return false;
-      _aesKey = CryptoJS.SHA256(key + _AES_SALT);
-      return true;
+    // ── Commands ──────────────────────────────────────────────────────────────
+    function doSend() {
+      const inp = document.getElementById('inp');
+      const txt = inp.value.trim();
+      if (!txt) return;
+      inp.value = '';
+      append('user', txt);
+      const enc  = _encrypt(txt);
+      const body = enc ? { enc } : { text: txt };
+      _authFetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
     }
 
-    function _encrypt(plaintext) {
-      if (!_aesKey || typeof CryptoJS === 'undefined') return null;
+    function doWake() {
+      sys('Sending wake signal…');
+      _authFetch('/api/wake', { method: 'POST' });
+    }
+
+    document.getElementById('inp').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    });
+
+    // ── TASKS — kanban ────────────────────────────────────────────────────────
+    const STATUSES = ['todo', 'in_progress', 'blocked', 'done'];
+    const COL_LABELS = { todo: 'To Do', in_progress: 'In Progress', blocked: 'Blocked', done: 'Done' };
+    let _tasks = [];
+
+    async function loadTasks() {
       try {
-        const iv  = CryptoJS.lib.WordArray.random(16);
-        const enc = CryptoJS.AES.encrypt(
-          CryptoJS.enc.Utf8.parse(plaintext), _aesKey,
-          { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-        );
-        const ivHex = iv.toString(CryptoJS.enc.Hex);
-        const ctHex = enc.ciphertext.toString(CryptoJS.enc.Hex);
-        const hex   = ivHex + ctHex;
-        const bytes = new Uint8Array(hex.length / 2);
-        for (let i = 0; i < bytes.length; i++)
-          bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-        return btoa(String.fromCharCode(...bytes));
-      } catch { return null; }
+        const r = await _authFetch('/api/tasks');
+        if (r.status === 401) { location.replace('/login'); return; }
+        const d = await r.json();
+        if (d.tasks) renderBoard(d.tasks);
+      } catch (err) { taskStatus('Could not load tasks: ' + err); }
     }
 
-    const _encReady = _sessionKey ? _initCrypto(_sessionKey) : false;
-    const encBadge  = document.getElementById('enc');
-    if (_encReady) { encBadge.className = 'enc-badge on'; }
-    else           { encBadge.className = 'enc-badge off'; encBadge.textContent = 'NO ENC'; }
+    function renderBoard(tasks) {
+      _tasks = tasks || [];
+      const board = document.getElementById('board');
+      board.innerHTML = '';
+      STATUSES.forEach(st => {
+        const col = document.createElement('div');
+        col.className = 'col';
+        col.dataset.status = st;
+        col.innerHTML = `<div class="col-head"><span class="col-title">${COL_LABELS[st]}</span>` +
+                        `<span class="col-count" id="cnt-${st}">0</span></div>`;
+        col.addEventListener('dragover', e => { e.preventDefault(); col.classList.add('drag-over'); });
+        col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+        col.addEventListener('drop', e => {
+          e.preventDefault();
+          col.classList.remove('drag-over');
+          const id = e.dataTransfer.getData('text/plain');
+          if (id) moveTask(id, st);
+        });
+        const cards = _tasks.filter(t => (t.status || 'todo') === st);
+        document.getElementById(`cnt-${st}`).textContent = cards.length;
+        cards.forEach(t => col.appendChild(taskCard(t)));
+        board.appendChild(col);
+      });
+    }
 
-    // ── WebSocket ─────────────────────────────────────────────────────────────
-    const feed  = document.getElementById('feed');
-    const pill  = document.getElementById('pill');
-    const stTxt = document.getElementById('st');
-    const wake  = document.getElementById('wake');
+    function taskCard(t) {
+      const d = document.createElement('div');
+      d.className = 'card' + (t.status === 'done' ? ' done' : '');
+      d.draggable = true;
+      d.dataset.id = t.id;
+      const pr = t.priority && t.priority !== 'medium'
+        ? `<span class="tag pr-${esc(t.priority)}">${esc(t.priority)}</span>` : '';
+      const tags = (t.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('');
+      d.innerHTML = `<div class="card-title">${esc(t.title)}</div>` +
+                    `<div class="card-meta">${pr}${tags}` +
+                    `<button class="card-del" title="Delete task">✕</button></div>`;
+      d.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/plain', t.id);
+        d.classList.add('dragging');
+      });
+      d.addEventListener('dragend', () => d.classList.remove('dragging'));
+      d.querySelector('.card-del').addEventListener('click', () => taskDispatch({ action: 'delete', task: t.id }));
+      d.addEventListener('dblclick', () => moveTask(t.id, t.status === 'done' ? 'todo' : 'done'));
+      return d;
+    }
 
-    const _wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const _wsUrl   = `${_wsProto}://${location.host}/ws?token=${encodeURIComponent(_authToken)}`;
-    const ws       = new WebSocket(_wsUrl);
+    async function taskDispatch(params) {
+      try {
+        const r = await _authFetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+        if (r.status === 401) { location.replace('/login'); return; }
+        const d = await r.json();
+        if (d.tasks) renderBoard(d.tasks);
+        if (!d.ok && d.message) taskStatus(d.message);
+        else if (d.ok && params.action !== 'list') {
+          const first = String(d.message || '').split('\n')[0];
+          taskStatus(first); 
+        }
+      } catch (err) { taskStatus('Task request failed: ' + err); }
+    }
 
-    ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
-    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
-    ws.onerror   = () => sys('Connection error.');
-    ws.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      if (m.type === 'log')           append(m.speaker, m.text);
-      if (m.type === 'status')        setStatus(m.state);
-      if (m.type === 'wake')          sys('Wake word detected — connecting…');
-      if (m.type === 'sys')           sys(m.text);
-      if (m.type === 'file_received') _onFileReceived(m);
-    };
+    function moveTask(id, status) {
+      const t = _tasks.find(x => x.id === id);
+      if (!t || t.status === status) return;
+      taskDispatch({ action: 'move', task: id, status });
+    }
 
-    function setStatus(s) {
-      if (s === 'active') {
-        pill.className = 'pill on'; stTxt.textContent = 'Active'; wake.classList.remove('show');
-      } else {
-        pill.className = 'pill'; stTxt.textContent = 'Sleeping'; wake.classList.add('show');
+    function addTaskFromInput() {
+      const inp = document.getElementById('task-inp');
+      const title = inp.value.trim();
+      if (!title) return;
+      inp.value = '';
+      taskDispatch({ action: 'add', title, status: 'todo' });
+    }
+
+    document.getElementById('task-inp').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); addTaskFromInput(); }
+    });
+
+    function taskStatus(msg) {
+      const el = document.getElementById('task-status');
+      el.textContent = msg || '';
+      if (msg) setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 4000);
+    }
+
+    // ── MEMORY ────────────────────────────────────────────────────────────────
+    let _memEntries = [];
+
+    async function loadMemory() {
+      const list = document.getElementById('mem-list');
+      try {
+        const r = await _authFetch('/api/memory');
+        if (r.status === 401) { location.replace('/login'); return; }
+        const d = await r.json();
+        _memEntries = d.entries || [];
+        renderMemory();
+      } catch (err) {
+        list.innerHTML = `<div class="mem-empty">Could not load memory: ${esc(err)}</div>`;
       }
     }
 
-    function append(speaker, text) {
-      const d = document.createElement('div');
-      if (speaker === 'jarvis') {
-        d.className = 'msg msg-j';
-        d.innerHTML = `<div class="lbl">Jarvis</div>${esc(text)}`;
-      } else {
-        d.className = 'msg msg-u';
-        d.innerHTML = `<div class="lbl">You</div>${esc(text)}`;
+    function renderMemory() {
+      const q = (document.getElementById('mem-search').value || '').toLowerCase();
+      const list = document.getElementById('mem-list');
+      const rows = _memEntries.filter(e =>
+        !q || `${e.category} ${e.key} ${e.value}`.toLowerCase().includes(q));
+      if (!rows.length) {
+        list.innerHTML = `<div class="mem-empty">${_memEntries.length ? 'No matches.' :
+          'Nothing stored yet — JARVIS saves facts automatically as you talk.'}</div>`;
+        return;
       }
-      feed.appendChild(d);
-      feed.scrollTop = feed.scrollHeight;
+      list.innerHTML = '';
+      rows.forEach(e => {
+        const d = document.createElement('div');
+        d.className = 'mem-item';
+        d.innerHTML = `<span class="mem-cat">${esc(e.category)}</span>` +
+                      `<span class="mem-key" title="${esc(e.key)}">${esc(e.key.replace(/_/g, ' '))}</span>` +
+                      `<span class="mem-val">${esc(e.value)}</span>` +
+                      `<button class="mem-del" title="Forget this">✕</button>`;
+        d.querySelector('.mem-del').addEventListener('click', async () => {
+          await _authFetch('/api/memory', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'forget', category: e.category, key: e.key }),
+          });
+          loadMemory();
+        });
+        list.appendChild(d);
+      });
     }
 
-    function sys(text) {
-      const d = document.createElement('div');
-      d.className = 'msg msg-sys'; d.textContent = text;
-      feed.appendChild(d); feed.scrollTop = feed.scrollHeight;
+    document.getElementById('mem-search').addEventListener('input', renderMemory);
+
+    // ── SYSTEM ────────────────────────────────────────────────────────────────
+    let _sysTimer = null;
+
+    function startSystem() {
+      loadSystem();
+      clearInterval(_sysTimer);
+      _sysTimer = setInterval(() => {
+        if (document.getElementById('view-system').classList.contains('active')) loadSystem();
+        else clearInterval(_sysTimer);
+      }, 3000);
     }
 
-    function esc(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    async function loadSystem() {
+      try {
+        const r = await _authFetch('/api/system');
+        if (r.status === 401) { location.replace('/login'); return; }
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        const grid = document.getElementById('sys-grid');
+        const bar = (pct) => `<div class="stat-bar"><i class="${pct > 90 ? 'hot' : ''}" style="width:${Math.max(2, Math.min(100, pct))}%"></i></div>`;
+        const temp = d.cpu_temp_c != null ? `${d.cpu_temp_c}<small> °C</small>` : '<small>n/a</small>';
+        const gpu  = d.gpu_percent != null ? `${d.gpu_percent}<small> %</small>` : '<small>n/a</small>';
+        grid.innerHTML = `
+          <div class="stat"><div class="stat-lbl">CPU</div><div class="stat-val">${d.cpu_percent}<small> %</small></div>${bar(d.cpu_percent)}</div>
+          <div class="stat"><div class="stat-lbl">RAM</div><div class="stat-val">${d.ram_percent}<small> %</small></div>${bar(d.ram_percent)}
+            <div class="sys-note">${d.ram_used_gb} / ${d.ram_total_gb} GB</div></div>
+          <div class="stat"><div class="stat-lbl">CPU Temp</div><div class="stat-val">${temp}</div></div>
+          <div class="stat"><div class="stat-lbl">GPU</div><div class="stat-val">${gpu}</div></div>
+          <div class="stat"><div class="stat-lbl">Uptime</div><div class="stat-val" style="font-size:16px">${esc(d.uptime || '')}</div></div>
+          <div class="stat"><div class="stat-lbl">Processes</div><div class="stat-val">${d.process_count ?? '<small>n/a</small>'}</div></div>`;
+        document.getElementById('sys-note').textContent = 'Live · samples every 3 s while this tab is open';
+      } catch (err) {
+        document.getElementById('sys-note').textContent = 'Could not read system metrics: ' + err;
+      }
     }
 
     // ── File helpers ──────────────────────────────────────────────────────────
@@ -318,7 +639,6 @@
     function _uploadFile(file) {
       const id = 'fc_' + Date.now() + '_' + Math.random().toString(36).slice(2);
 
-      // Create file card in feed
       const card = document.createElement('div');
       card.className = 'msg-file';
       card.id = id;
@@ -404,35 +724,9 @@
       toast('File received on computer!');
     }
 
-    // File input change handler
     document.getElementById('file-inp').addEventListener('change', function () {
       Array.from(this.files).forEach(_uploadFile);
-      this.value = ''; // reset so the same file can be re-sent
-    });
-
-    // ── Commands ──────────────────────────────────────────────────────────────
-    function doSend() {
-      const inp = document.getElementById('inp');
-      const txt = inp.value.trim();
-      if (!txt) return;
-      inp.value = '';
-      append('user', txt);
-      const enc  = _encrypt(txt);
-      const body = enc ? { enc } : { text: txt };
-      _authFetch('/api/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    }
-
-    function doWake() {
-      sys('Sending wake signal…');
-      _authFetch('/api/wake', { method: 'POST' });
-    }
-
-    document.getElementById('inp').addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+      this.value = '';
     });
 
     // ── Toast ─────────────────────────────────────────────────────────────────
@@ -443,6 +737,9 @@
       clearTimeout(_toastTimer);
       _toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
     }
+
+    // ── Initial loads ─────────────────────────────────────────────────────────
+    loadTasks();
 
     // ── Real-time Voice — PCM16 WebSocket → Gemini Live ──────────────────────
     const micBtn  = document.getElementById('mic-btn');
@@ -474,7 +771,7 @@
     }
 
     function _showVoiceSetup() {
-      if (document.getElementById('voice-setup')) return; // show once
+      if (document.getElementById('voice-setup')) return;
       const origin = location.origin;
       const card = document.createElement('div');
       card.id = 'voice-setup';
@@ -495,7 +792,6 @@
         '</ol>';
       feed.appendChild(card);
       feed.scrollTop = feed.scrollHeight;
-      // tap to copy
       card.querySelector('#flags-url').addEventListener('click', () => {
         navigator.clipboard?.writeText(origin).then(() => toast('URL copied!')).catch(() => {});
       });
@@ -520,7 +816,6 @@
         return;
       }
 
-      // 16 kHz context (fall back to native rate — _f32toPcm16 resamples)
       let ctx;
       try { ctx = new AudioContext({ sampleRate: 16000 }); }
       catch (_) { ctx = new AudioContext(); }
@@ -536,15 +831,12 @@
         const rate = ctx.sampleRate;
         const src  = ctx.createMediaStreamSource(stream);
 
-        // AudioWorklet (modern) — runs in dedicated audio thread
         const wCode = `class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('j',J);`;
         try {
           const burl = URL.createObjectURL(new Blob([wCode], { type: 'application/javascript' }));
           await ctx.audioWorklet.addModule(burl);
           URL.revokeObjectURL(burl);
           const nd = new AudioWorkletNode(ctx, 'j');
-          // Buffer to 1024 samples (64 ms at 16 kHz) before sending —
-          // matches PC mic chunk size, prevents queue flooding on the server.
           let _pbuf = [], _plen = 0;
           nd.port.onmessage = e => {
             const chunk = new Int16Array(_f32toPcm16(e.data, rate));
@@ -559,7 +851,6 @@
           src.connect(nd);
           _audioNd = nd;
         } catch (_) {
-          // ScriptProcessor fallback (deprecated, still works everywhere)
           const sp = ctx.createScriptProcessor(4096, 1, 1);
           sp.onaudioprocess = e => {
             if (ws.readyState === 1) ws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
@@ -586,7 +877,7 @@
     function _stopVoice() {
       if (_audioNd)  { try { _audioNd.disconnect(); }  catch (_) {}; _audioNd  = null; }
       if (_audioCtx) { try { _audioCtx.close(); }      catch (_) {}; _audioCtx = null; }
-      if (_micStm)   { _micStm.getTracks().forEach(t => t.stop()); _micStm = null; }
+      if (_micStm)   { try { _micStm.getTracks().forEach(t => t.stop()); } catch (_) {}; _micStm = null; }
       if (_voiceWs)  {
         const w = _voiceWs; _voiceWs = null;
         if (w.readyState < 2) w.close();

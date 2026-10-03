@@ -37,6 +37,10 @@ cryptography
 python-multipart
 qrcode[pil]
 
+# ── Optional: Supabase cloud sync for the task board (free tier) ─────────────
+# Only used when config/supabase.json exists — everything stays local otherwise.
+supabase
+
 # ── Plugin extras: Gmail / Google Calendar (OAuth) ────────────────────────────
 google-api-python-client
 google-auth-oauthlib

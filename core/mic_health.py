@@ -92,7 +92,41 @@ _endpoints_healed = False
 # Driver-install artifacts / virtual loopbacks that sometimes leak small
 # noise peaks — technically "signal", but not a real microphone. They are
 # pushed to the very END of the audit order; still usable as a last resort.
-_JUNK_HINTS = ("afinstall", "virtual", "stereo mix", "loopback")
+# NOTE: "afdinstall" (AMDAfdInstall Wave Microphone) is spelled out because
+# "afinstall" does NOT substring-match it — measured: that single missing
+# letter let a loopback record itself as the shared mic for a whole day.
+_JUNK_HINTS = ("afdinstall", "afinstall", "virtual", "stereo mix", "loopback")
+
+
+def _is_junk_name(name: str) -> bool:
+    """True for driver-install artifacts / virtual loopbacks.
+
+    Measured live: 'AMDAfdInstall Wave Microphone - 1' got RECORDED as the
+    shared mic during a mute episode (it always 'hears' — it loops system
+    audio) and then queue-jumped every future audit via shared-mic adoption,
+    poisoning device selection for a whole day. Junk must never be adopted
+    or recorded as a proven mic."""
+    n = (name or "").lower()
+    return any(h in n for h in _JUNK_HINTS)
+
+
+def _default_output_is_bt() -> bool:
+    """True when the OS default OUTPUT device is a Bluetooth sink.
+
+    Bluetooth headsets run A2DP (hi-fi, mic closed) or HFP (phone-call
+    quality, mic open) — opening the headset's MICROPHONE forces the whole
+    headset into call mode and every system sound degrades until it closes.
+    While the user is LISTENING through the headset, capture should therefore
+    prefer a non-Bluetooth mic; the BT mic is only preferred for pickup when
+    it is not the active listening device."""
+    try:
+        import sounddevice as sd
+        idx = sd.default.device[1]
+        if idx is None or idx < 0:
+            return False
+        return _is_bluetooth(sd.query_devices()[idx].get("name") or "")
+    except Exception:
+        return False
 
 
 def current_signature() -> str:
@@ -370,10 +404,19 @@ def pick_input_device_inprocess(logger=None,
             except Exception:
                 pass
             i = _shared_cands[0]
-            _log(f"using mic already live in the other JARVIS process: "
-                 f"'{shared[:44]}'")
-            _cache = (time.monotonic(), i)
-            return i
+            # Verify before adopting. Measured live: the launcher adopted the
+            # other process's mic WITHOUT a probe, and that name was the AMD
+            # array — digitally dead — so it re-picked a deaf mic on every
+            # boot while a healthy headset sat unused. A 1 s probe keeps the
+            # BT-contention protection (the full audit re-probes Bluetooth
+            # with settle retries) while refusing to adopt silence.
+            _vp = _peak_level(i, _probe_rate(devices[i]), 1.0)
+            if _vp is not None and _vp > _SILENCE_PEAK:
+                _log(f"using mic already live in the other JARVIS process: "
+                     f"'{shared[:44]}' (verified, peak {_vp})")
+                _cache = (time.monotonic(), i)
+                return i
+            _log(f"shared mic '{shared[:44]}' reads silence now — full audit")
         _log(f"shared mic '{shared[:44]}' not in current device list — full audit")
 
     # Candidates in priority GROUPS: the first group with any member proven
@@ -396,8 +439,7 @@ def pick_input_device_inprocess(logger=None,
             or (devices[idx].get("name") or "").lower()[:24] in saved_name.lower()
 
     def _junk(i: int) -> int:
-        return 1 if any(h in (devices[i].get("name") or "").lower()
-                        for h in _JUNK_HINTS) else 0
+        return 1 if _is_junk_name(devices[i].get("name") or "") else 0
 
     bt_members    = sorted((i for i, _ in inputs
                             if _is_bluetooth(devices[i].get("name") or "")),
@@ -416,6 +458,15 @@ def pick_input_device_inprocess(logger=None,
                   bt_members]
     elif pref == "bluetooth":
         groups = [saved_matches, bt_members, default_group]
+    elif _default_output_is_bt():
+        # Auto, headset actively listened through: built-in mic FIRST so the
+        # headset stays in A2DP (hi-fi). Grabbing the BT mic here is what made
+        # system audio flip to phone-call quality every few minutes.
+        groups = [saved_matches,
+                  [i for i in nonbt_members if i == default_in],
+                  nonbt_members,
+                  bt_members,
+                  default_group]
     else:
         # Auto (default): Bluetooth headset when connected, built-in otherwise.
         groups = [saved_matches, bt_members, default_group]
@@ -488,17 +539,22 @@ _STATE_FILE = (Path(__file__).resolve().parent.parent / "voice-launcher"
 
 
 def read_shared_mic() -> str:
-    """Device name recorded by the other JARVIS-family process, or ''."""
+    """Device name recorded by the other JARVIS-family process, or ''.
+
+    Driver-artifact names are refused: a loopback once recorded itself as the
+    shared mic and queue-jumped every audit for a day."""
     try:
-        return _STATE_FILE.read_text(encoding="utf-8").strip()
+        name = _STATE_FILE.read_text(encoding="utf-8").strip()
+        return "" if _is_junk_name(name) else name
     except Exception:
         return ""
 
 
 def write_shared_mic(name: str) -> None:
-    """Record a mic that is OPEN and working in this process (best-effort)."""
+    """Record a mic that is OPEN and working in this process (best-effort).
+    Junk/virtual artifacts are never recorded."""
     try:
-        if name:
+        if name and not _is_junk_name(name):
             _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             _STATE_FILE.write_text(name.strip(), encoding="utf-8")
     except Exception:

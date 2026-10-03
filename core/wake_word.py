@@ -123,16 +123,22 @@ class WakeWordDetector:
 
     def start(self) -> bool:
         """Load the model and spawn the inference thread. Returns True on success.
-        Safe to call again — a no-op if already running. Never raises."""
-        if self._running:
+        Safe to call again — a no-op if already running. Never raises.
+
+        A NATIVELY crashed inference thread leaves ``_running`` True with a
+        dead thread; ``if self._running`` alone would then report success
+        forever while nothing listens. Revive whenever the thread is gone
+        (the loaded model object survives thread death and is reused)."""
+        if self._running and self.is_alive():
             return True
-        try:
-            from openwakeword.model import Model
-            self._model = Model(wakeword_models=[WAKE_MODEL], inference_framework="onnx")
-        except Exception as e:
-            self._logger(f"Wake word: could not load model — {e}")
-            self._model = None
-            return False
+        if self._model is None:
+            try:
+                from openwakeword.model import Model
+                self._model = Model(wakeword_models=[WAKE_MODEL], inference_framework="onnx")
+            except Exception as e:
+                self._logger(f"Wake word: could not load model — {e}")
+                self._model = None
+                return False
         self._running = True
         self._ready = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="WakeWordThread")
@@ -200,3 +206,56 @@ class WakeWordDetector:
                 self._queue.get_nowait()
         except Exception:
             pass
+
+    # ── Health / self-repair ─────────────────────────────────────────────
+
+    def is_alive(self) -> bool:
+        """True while the inference thread is actually running.
+
+        A dead thread with ``ready`` still True is the measured silent-death
+        mode: the object looks healthy, nothing will ever fire, and "Hey
+        Jarvis" goes permanently deaf. Callers rebuild the detector when this
+        returns False."""
+        t = self._thread
+        return bool(t and t.is_alive())
+
+    def ensure_watchdog(self, repair: Callable[[], bool],
+                        logger: Callable[[str], None] | None = None,
+                        interval: float = 10.0) -> None:
+        """Spawn (once) a thread that restarts detection if the thread dies.
+
+        ``repair`` is the OWNER's own (re)build callable — e.g.
+        JarvisLive._ensure_wake_detector — so a fresh detector instance is
+        created on the same object slot the mic callback reads, and a native
+        ONNX crash of the inference thread self-heals within ~10 s instead of
+        leaving the app permanently deaf to the wake word. Never raises."""
+        if getattr(self, "_watchdog_on", False):
+            return
+        self._watchdog_on = True
+
+        def _watch() -> None:
+            import time as _t
+            repairs = 0
+            while True:
+                _t.sleep(interval)
+                if self.is_alive():
+                    continue
+                if logger is not None:
+                    try:
+                        logger("Wake word: detector thread died — restarting it.")
+                    except Exception:
+                        pass
+                try:
+                    repair()
+                except Exception:
+                    pass
+                # This watchdog belongs to THIS instance; once the owner has
+                # rebuilt the slot, a replaced instance's loop would tick
+                # pointlessly forever — retire it after a minute of attempts
+                # (the replacement detector runs its own watchdog).
+                repairs += 1
+                if repairs >= 6:
+                    return
+
+        threading.Thread(target=_watch, daemon=True,
+                         name="WakeWordWatchdog").start()

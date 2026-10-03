@@ -93,6 +93,10 @@ from core.wake_word            import (
 from core                      import tool_log
 from memory.conversations       import append_turn as _conv_log
 
+# Supabase sync (optional): starts only when config/supabase.json exists with
+# a URL and service key — zero cost, zero behavior change when it doesn't.
+from memory.supabase_sync       import start_supabase_sync
+
 # How long the assistant stays awake with no user speech before it auto-sleeps
 # again (wake-word mode only).
 WAKE_SLEEP_TIMEOUT = 120.0   # seconds (2 minutes)
@@ -625,14 +629,26 @@ class JarvisLive:
         return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready}
 
     def _ensure_wake_detector(self) -> bool:
-        """Load the detector once (model loads on first start). Idempotent."""
-        if self._wake_detector is None:
+        """Load the detector once (model loads on first start). Idempotent.
+
+        Patch (measured failure): the detector thread can DIE (native ONNX
+        error) while ``ready`` stays True — the object looks healthy but
+        nothing will ever fire and "Hey Jarvis" goes permanently deaf. The
+        readiness re-check plus a watchdog thread notices a dead thread and
+        rebuilds the detector within ~10 s, so wake word recovers instead of
+        silently rotting for the rest of the session."""
+        if self._wake_detector is None or not self._wake_detector.is_alive():
             self._wake_detector = WakeWordDetector(
                 on_detect=self._on_wake_detected,
                 logger=lambda m: (print(f"[Wake] {m}"), self.ui.write_log(f"SYS: {m}")),
             )
         if not self._wake_detector.ready:
-            return self._wake_detector.start()
+            if not self._wake_detector.start():
+                return False
+        self._wake_detector.ensure_watchdog(
+            lambda: self._ensure_wake_detector(),
+            logger=lambda m: (print(f"[Wake] {m}"), self.ui.write_log(f"SYS: {m}")),
+        )
         return True
 
     def _on_wake_detected(self) -> None:
@@ -666,7 +682,11 @@ class JarvisLive:
                 speaking = self._is_speaking
             if speaking:
                 continue
+            # getattr guards: this loop can briefly race _listen_audio's init
+            # of the mic-silence counters on a session rebuild.
             if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
+                self._mic_peak_since = getattr(self, "_mic_peak_since", 0)
+                self._mic_peak = getattr(self, "_mic_peak", 0)
                 self.sleep(reason="no speech for 2 minutes")
 
     # Patch: latency watchdog — if Gemini stalls mid-turn (network hiccup) the
@@ -963,7 +983,7 @@ class JarvisLive:
         args = dict(fc.args or {})
 
         _t0 = time.monotonic()   # for the tool-log duration stamp
-        print(f"[JARVIS] 🔧 {name}  {args}")
+        print(f"[JARVIS] 🔧 {name}  {args}  (t={datetime.now().strftime('%H:%M:%S.%f')[:-5]})")
         self.ui.set_state("THINKING")
 
         if name == "save_memory":
@@ -1283,7 +1303,15 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        _tool_dt = time.monotonic() - _t0
+        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}  [{_tool_dt:.2f}s]")
+        if _tool_dt > 5.0:
+            # Slow tools are invisible in the HUD today; surface them so
+            # "it takes very very long" becomes diagnosable from the log.
+            try:
+                self.ui.write_log(f"SYS: Tool '{name}' took {_tool_dt:.1f}s.")
+            except Exception:
+                pass
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result}
@@ -1322,6 +1350,23 @@ class JarvisLive:
                 if new_sig and new_sig != sig:
                     sig = new_sig
                     mic_health._cache = None   # force a fresh audit on reconnect
+                    # Damping: a Bluetooth A2DP<->HFP flip rewrites the device
+                    # list while the PHYSICAL mic is unchanged. Blind reconnects
+                    # here re-opened the BT mic, forced HFP (phone-call audio)
+                    # again, and looped the whole-headset quality flapping the
+                    # user hears. Reconnect only when the audit would truly
+                    # choose a DIFFERENT mic than the one in use.
+                    keep_name = (getattr(self, "_last_mic_name", "") or "").strip()
+                    want = await asyncio.to_thread(mic_health.pick_input_device)
+                    want_name = ""
+                    if want is not None:
+                        try:
+                            want_name = (sd.query_devices()[want].get("name") or "").strip()
+                        except Exception:
+                            pass
+                    if keep_name and want_name and want_name == keep_name:
+                        print("[JARVIS] 🎙 device list changed, chosen mic unchanged — no reconnect")
+                        continue
                     print("[JARVIS] 🎙 audio device list changed — reconnecting on the new mic")
                     try:
                         self.ui.write_log("SYS: Microphone changed — reconnecting on it.")
@@ -1334,6 +1379,16 @@ class JarvisLive:
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
+
+        # Patch: digital-silence watchdog state. The built-in AMD mic array
+        # (OS default here) reads pure zeros whenever Windows re-applies its
+        # endpoint mute — frames keep flowing, so a frames-based check never
+        # fires, and in wake-word mode (asleep) the mic is GATED from Gemini:
+        # nothing else in the pipeline can notice. These counters give the
+        # sleep path its own voice-health signal.
+        self._mic_peak = 0
+        self._mic_peak_since = 0
+        self._mic_last_recover = 0.0
 
         def callback(indata, frames, time_info, status):
             # HUD cosmetics run for EVERY chunk, before any gate: the mic
@@ -1359,6 +1414,46 @@ class JarvisLive:
                 det = self._wake_detector
                 if det is not None:
                     det.feed(indata)
+                # Digital-silence watchdog (asleep only): ~every 15 s, if the
+                # peak stayed at digital-zero level, heal the endpoint mute in
+                # a worker thread and reconnect on a mic that provably hears.
+                # Measured live: the launcher sat deaf on a muted AMD array
+                # for hours while looking perfectly healthy.
+                try:
+                    self._mic_peak = max(self._mic_peak,
+                                         int(np.abs(indata).max()) if indata.size else 0)
+                    self._mic_peak_since += 1
+                    if (self._mic_peak_since % 150) == 0:
+                        if self._mic_peak <= 3:
+                            _now_m = time.monotonic()
+                            if (_now_m - self._mic_last_recover) > 90:
+                                self._mic_last_recover = _now_m
+                                print("[JARVIS] ⚠️ Mic delivers digital silence while asleep — healing + re-auditing devices")
+                                try:
+                                    self.ui.write_log("SYS: Microphone went silent — recovering…")
+                                except Exception:
+                                    pass
+                                def _mic_heal():
+                                    # IMPORTANT: no COM/pycaw in this process —
+                                    # healing must happen inside the probe's
+                                    # short-lived sandboxed child (see
+                                    # core/mic_health.py SANDBOX notes).
+                                    try:
+                                        from core import mic_health as _mh
+                                        _mh._cache = None
+                                        _mh._known_good = None
+                                        _mh.pick_input_device()
+                                    except Exception:
+                                        pass
+                                threading.Thread(target=_mic_heal, daemon=True,
+                                                 name="mic-heal").start()
+                                try:
+                                    self._reconnect_event.set()
+                                except Exception:
+                                    pass
+                        self._mic_peak = 0
+                except Exception:
+                    pass
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
@@ -2086,6 +2181,16 @@ class JarvisLive:
             self._dashboard.set_log_target(self.ui)
             self._dashboard.set_connect_callback(self._on_phone_connected)
 
+            # Task board → dashboard: every manage_tasks mutation is pushed
+            # to connected phones/browsers over the existing WebSocket.
+            # Same bind-and-fire pattern as confirm_gate/set_trim_notifier:
+            # the tool file owns nothing about where the push goes.
+            try:
+                from actions import manage_tasks as _tasks
+                _tasks.set_change_notifier(self._dashboard.push_task_change)
+            except Exception as _te:
+                print(f"[Tasks] dashboard push disabled: {_te}")
+
             async def _dashboard_supervisor() -> None:
                 """Watchdog: the dashboard must outlive any single crash.
 
@@ -2117,6 +2222,10 @@ class JarvisLive:
             _crumb("dashboard serve task created (watchdog-wrapped)")
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())
+
+            # Optional Supabase sync — activates only when the user saved
+            # config/supabase.json. Silent no-op otherwise (offline by default).
+            asyncio.create_task(start_supabase_sync(self._dashboard))
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None

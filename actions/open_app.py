@@ -3,11 +3,8 @@ import subprocess
 import platform
 import shutil
 
-try:
-    import psutil
-    _PSUTIL = True
-except ImportError:
-    _PSUTIL = False
+import importlib.util
+_PSUTIL = importlib.util.find_spec("psutil") is not None
 
 _SYSTEM = platform.system()
 

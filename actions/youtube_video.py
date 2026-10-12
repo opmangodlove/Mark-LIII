@@ -1,25 +1,18 @@
 #youtube_video.py
+from config import is_windows, is_mac, is_linux
 import json
 import re
 import sys
-import time
 import subprocess
-import shutil
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote_plus
 
-try:
-    import pyautogui
-    _PYAUTOGUI = True
-except ImportError:
-    _PYAUTOGUI = False
+import importlib.util
+_PYAUTOGUI = importlib.util.find_spec("pyautogui") is not None
 
-try:
-    import numpy as np
-    _NUMPY = True
-except ImportError:
-    _NUMPY = False
+import importlib.util
+_NUMPY = importlib.util.find_spec("numpy") is not None
 
 try:
     import requests
@@ -33,7 +26,6 @@ try:
 except ImportError:
     _TRANSCRIPT_OK = False
 
-from config import get_os, is_windows, is_mac, is_linux
 
 
 def _get_base_dir() -> Path:

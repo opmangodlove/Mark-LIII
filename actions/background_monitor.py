@@ -7,7 +7,6 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from pathlib import Path
 
 
 # ── Blocked categories (never monitor regardless of what user says) ────────────

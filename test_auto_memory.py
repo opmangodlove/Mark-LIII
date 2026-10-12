@@ -1,5 +1,5 @@
 """test_auto_memory.py — adaptive memory: learn, expire, pointer (isolated)."""
-import sys, tempfile, json
+import sys, tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 

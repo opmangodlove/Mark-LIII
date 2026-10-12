@@ -1,0 +1,18 @@
+# CI lint baseline: enforce bug-bearing rules only.
+# The codebase is a long-lived personal project; stylistic modernization
+# (E501, I001, UP, S, BLE, ...) is intentionally left OUT of the gate.
+line-length = 200
+target-version = "py311"
+
+[lint]
+select = [
+    "E9",   # syntax errors
+    "F63",  # invalid escaping in f-strings
+    "F7",   # syntax error in forward annotations
+    "F82",  # undefined names
+    "F401", # unused imports
+    "F821", # undefined name in annotation
+    "F823", # local undefined
+]
+ignore = []
+

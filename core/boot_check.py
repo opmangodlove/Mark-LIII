@@ -201,7 +201,7 @@ def check_live_model() -> tuple[bool, str]:
     only when NO known live model is visible: a real configuration problem.
     Inconclusive results (network busy) never alarm."""
     try:
-        from memory.config_manager import get_live_model_candidates
+        from memory.config_manager import get_live_model_candidates, load_api_keys
         cands = get_live_model_candidates()
         key = (load_api_keys().get("gemini_api_key") or "").strip()
     except Exception:

@@ -10,7 +10,6 @@ Gemini client and asserts:
 """
 
 import sys
-import time
 
 sys.path.insert(0, ".")
 

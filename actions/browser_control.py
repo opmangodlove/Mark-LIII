@@ -50,6 +50,11 @@ def _ensure_playwright_loaded() -> None:
         "async_playwright", "BrowserContext", "Page", "Playwright",
         "PlaywrightTimeout",
     })
+if False:  # lint hints: injected by _ensure_playwright_loaded()
+    from playwright.async_api import (  # noqa: F401
+        async_playwright, BrowserContext, Page, Playwright,
+        TimeoutError as PlaywrightTimeout,
+    )
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:

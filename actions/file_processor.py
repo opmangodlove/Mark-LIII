@@ -16,14 +16,12 @@ Supported types:
   pptx    → summarize, extract_text, to_pdf
 """
 
-import os
 import re
 import json
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from datetime import datetime
 
 def _get_api_key() -> str:
     config_path = Path(__file__).resolve().parent.parent / "config" / "api_keys.json"

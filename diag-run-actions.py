@@ -4,10 +4,8 @@ Clicks, typing, drags, app launches, shutdowns and anything that mutates the
 system are skipped on purpose. Everything else runs: if a tool raises, it
 fails here — not on the user's next voice command.
 """
-import asyncio
 import glob
 import importlib
-import json
 import sys
 import time
 

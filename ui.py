@@ -19,18 +19,17 @@ else:
     _WIN_HIDE: dict = {}
 
 from PyQt6.QtCore import (
-    QEasingCurve, QMimeData, QObject, QParallelAnimationGroup, QPointF,
-    QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal,
+    QPointF,
+    QRectF, Qt, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut,
+    QKeySequence, QPainter, QPen, QPixmap, QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 # Patch: optional global-hotkey support so F4 (mute) works even when this
@@ -4153,7 +4152,7 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
         lay.addStretch()
-                return w
+        return w
 
     def _on_file_selected(self, path: str):
         self._current_file = path

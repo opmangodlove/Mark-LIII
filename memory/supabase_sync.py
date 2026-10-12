@@ -137,7 +137,7 @@ def _pull_once_blocking() -> int:
     if str(_BASE_DIR) not in _sys.path:
         _sys.path.insert(0, str(_BASE_DIR))
 
-    from actions.manage_tasks import _load, _save, _lock, board_data
+    from actions.manage_tasks import _load, _save, _lock
 
     sb = _get_client()
     if sb is None:

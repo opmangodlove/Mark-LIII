@@ -1,4 +1,5 @@
 import platform as _platform
+import subprocess
 import subprocess as _subprocess
 
 # ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────

@@ -1,4 +1,4 @@
-$base = 'C:\Users\__DIR__/Mark-LIII'
+$base = $PSScriptRoot
 # Stop ALL old JARVIS + launcher processes
 $p = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
     Where-Object { $_.CommandLine -like '*main.py*' -or $_.CommandLine -like '*voice_launch.py*' }

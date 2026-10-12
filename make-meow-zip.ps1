@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
-$src   = 'C:\Users\__DIR__/Mark-LIII'
+$src   = $PSScriptRoot
 $stage = Join-Path $env:TEMP 'meow-stage'
-$zip   = 'C:\Users\__HOMEDIR__\MEOW MEOW.zip'
+$zip   = Join-Path ([Environment]::GetFolderPath('Desktop')) 'MEOW MEOW.zip'
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 if (Test-Path $zip)   { Remove-Item $zip -Force }

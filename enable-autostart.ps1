@@ -12,8 +12,9 @@ param(
     [switch]$Off
 )
 
-$pyw   = 'C:\Users\__DIR__/Mark-LIII\.venv\Scripts\pythonw.exe'
-$base  = 'C:\Users\__DIR__/Mark-LIII'
+$pyw  = Join-Path $base '.venv\Scripts\pythonw.exe'
+if (-not (Test-Path $pyw)) { $pyw = 'pythonw.exe' }
+$base = $PSScriptRoot
 $run   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
 if ($Off) {
